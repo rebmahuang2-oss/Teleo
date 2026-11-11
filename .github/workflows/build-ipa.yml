@@ -1,0 +1,88 @@
+name: Build unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+env:
+  # 已讀過原始碼並據此撰寫橋接程式的 idevice 版本；更新版本前請先確認 API 沒變
+  IDEVICE_REF: 89702099f4d7552f704f93b4526756abda319ceb
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout idevice
+        uses: actions/checkout@v4
+        with:
+          repository: jkcoxson/idevice
+          ref: ${{ env.IDEVICE_REF }}
+          path: idevice
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: idevice
+
+      - name: Build idevice (iOS device static library)
+        working-directory: idevice/ffi
+        run: |
+          set -o pipefail
+          BINDGEN_EXTRA_CLANG_ARGS="--sysroot=$(xcrun --sdk iphoneos --show-sdk-path)" \
+          IPHONEOS_DEPLOYMENT_TARGET=17.0 \
+          cargo build --release --target aarch64-apple-ios --features obfuscate 2>&1 | tee ../../idevice-build.log
+
+      - name: Stage idevice header and library
+        run: |
+          mkdir -p ThirdParty/idevice
+          cp idevice/ffi/idevice.h ThirdParty/idevice/idevice.h
+          cp idevice/target/aarch64-apple-ios/release/libidevice_ffi.a ThirdParty/idevice/libidevice_ffi.a
+          ls -la ThirdParty/idevice
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build app (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -project VirtualLoc.xcodeproj \
+            -scheme VirtualLoc \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath build/VirtualLoc.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" 2>&1 | tee xcodebuild.log
+
+      - name: Package IPA
+        run: |
+          mkdir -p build/Payload
+          cp -R build/VirtualLoc.xcarchive/Products/Applications/VirtualLoc.app build/Payload/
+          cd build
+          zip -qr VirtualLoc.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VirtualLoc-ipa
+          path: build/VirtualLoc.ipa
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            idevice-build.log
+            xcodebuild.log
