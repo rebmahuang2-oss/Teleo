@@ -74,6 +74,9 @@ final class SimulationEngine: ObservableObject {
     private var hopping = false
     private var hopElapsed = 0.0
     private var lastSend = Date.distantPast
+    /// 上一次依照時速推進路線／搖桿位置的真實時間。用真實經過時間而非固定的 tick
+    /// 常數來算距離，時速才不會因為 Timer 抖動或網路延遲而失準（見 onTick 註解）。
+    private var lastAdvanceTime = Date()
     private var reconnectTask: Task<Void, Never>?
     private var isSpoofing = false {
         didSet { keepAlive?.isSpoofing = isSpoofing }
@@ -81,6 +84,14 @@ final class SimulationEngine: ObservableObject {
 
     init() {
         autoConnect = UserDefaults.standard.object(forKey: "autoConnect") as? Bool ?? true
+        NotificationCenter.default.addObserver(
+            forName: .teleoPiPToggle, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                if self.routePaused { self.resumeRoute() } else { self.pauseRoute() }
+            }
+        }
     }
 
     func attach(store: Store, keepAlive: KeepAlive) {
@@ -183,7 +194,10 @@ final class SimulationEngine: ObservableObject {
 
     func setJoystick(_ v: CGVector) {
         if v == .zero {
-            if mode == .joystick { mode = .point }
+            if mode == .joystick {
+                mode = .point
+                if !routeRunning { PiPOverlay.shared.stop() }
+            }
             joystick = .zero
             return
         }
@@ -200,6 +214,8 @@ final class SimulationEngine: ObservableObject {
             }
             mode = .joystick
             isSpoofing = true
+            lastAdvanceTime = Date()
+            PiPOverlay.shared.start()
         }
         joystick = v
     }
@@ -387,15 +403,19 @@ final class SimulationEngine: ObservableObject {
         routePaused = false
         mode = .route
         isSpoofing = true
+        lastAdvanceTime = Date()
         send(route[routeIndex])
         store?.record(route: route)
         message = "路線開始"
+        PiPOverlay.shared.start()
+        updatePiPOverlay()
     }
 
     func pauseRoute() {
         guard routeRunning else { return }
         routePaused = true
         message = "路線已暫停"
+        updatePiPOverlay()
     }
 
     /// 繼續路線：先回到暫停點再接著走
@@ -405,8 +425,10 @@ final class SimulationEngine: ObservableObject {
         joystick = .zero
         mode = .route
         routePaused = false
+        lastAdvanceTime = Date()
         send(routeCoordinate())
         message = "路線繼續"
+        updatePiPOverlay()
     }
 
     func stopRoute() {
@@ -417,6 +439,30 @@ final class SimulationEngine: ObservableObject {
         routeIndex = 0
         segProgress = 0
         if mode == .route { mode = isSpoofing ? .point : .idle }
+        PiPOverlay.shared.stop()
+    }
+
+    /// 更新浮動子母畫面視窗裡顯示的進度文字，路線跟搖桿模式都會呼叫，
+    /// 時速會放在最前面，跟著 routeKmh／joystickKmh 即時變化。
+    private func updatePiPOverlay() {
+        if mode == .joystick {
+            guard joystick != .zero else { return }
+            PiPOverlay.shared.update(
+                title: "搖桿中 · Teleo",
+                subtitle: "\(joystickKmh.kmhText) · 持續送出定位",
+                isPaused: false)
+            return
+        }
+        guard routeRunning else { return }
+        let title = routePaused ? "已暫停 · Teleo" : "進行中 · Teleo"
+        var parts = [routeKmh.kmhText, "第 \(routeIndex + 1) / \(route.count) 點"]
+        if let farmText = farmProgressText { parts.append(farmText) }
+        if let hopText = hopProgressText { parts.append(hopText) }
+        if let laps = lapsTotalText { parts.append(laps) }
+        if !routePaused {
+            parts.append("剩 \(remainingMeters.distanceText) · 約 \(remainingSeconds.durationText)")
+        }
+        PiPOverlay.shared.update(title: title, subtitle: parts.joined(separator: " · "), isPaused: routePaused)
     }
 
     func nextPoint() {
@@ -460,13 +506,29 @@ final class SimulationEngine: ObservableObject {
 
     private func onTick() {
         guard connection == .connected else { return }
+
+        // 用「真實經過時間」而不是固定的 tick 常數換算這次要走的距離。
+        // 原本每次都假設剛好經過 0.5 秒，但 Timer 本身會有誤差，加上每次送出定位
+        // 都要等裝置回應（有網路延遲），忙不過來時會把來不及送的中間點直接丟掉、
+        // 只送最新的一個（見 send()），這樣算出來的「兩次定位之間差多少秒」
+        // 會比 0.5 秒長，遊戲端用距離除以時間反推出的時速就會偏低、忽快忽慢。
+        // 改成每次都用真正經過的時間去算距離，不管送出的頻率怎麼抖動，
+        // 距離／時間的比例永遠等於設定的時速，時速才會準。
+        let now = Date()
+        let dt = min(now.timeIntervalSince(lastAdvanceTime), tick * 4)   // 上限避免背景過久後一次跳一大段
+        lastAdvanceTime = now
+
         switch mode {
         case .route:
             if routeRunning && !routePaused {
-                if hopping { hopTick() } else { advanceRoute(meters: routeKmh / 3.6 * tick) }
+                if hopping { hopTick() } else { advanceRoute(meters: routeKmh / 3.6 * dt) }
+                updatePiPOverlay()
             }
         case .joystick:
-            if joystick != .zero { moveByJoystick(meters: joystickKmh / 3.6 * tick) }
+            if joystick != .zero {
+                moveByJoystick(meters: joystickKmh / 3.6 * dt)
+                updatePiPOverlay()
+            }
         default:
             break
         }

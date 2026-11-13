@@ -164,4 +164,9 @@ extension Double {
     var distanceText: String {
         self >= 1000 ? String(format: "%.2f 公里", self / 1000) : String(format: "%.0f 公尺", self)
     }
+
+    /// 時速（km/h）→ 「5.0 km/h」之類的文字
+    var kmhText: String {
+        String(format: "%.1f km/h", self)
+    }
 }

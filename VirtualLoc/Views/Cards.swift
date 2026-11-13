@@ -9,23 +9,40 @@ struct SpeedRow: View {
     var range: ClosedRange<Double> = 1...120
 
     var body: some View {
-        HStack {
-            Image(systemName: "speedometer")
-            Text("速度 \(Int(kmh)) km/h")
-                .font(.headline)
-                .monospacedDigit()
-            Spacer()
-            stepButton("minus") { kmh = max(range.lowerBound, kmh - 1) }
-            stepButton("plus") { kmh = min(range.upperBound, kmh + 1) }
+        VStack(spacing: 8) {
+            HStack {
+                Image(systemName: "speedometer")
+                Text(kmh.kmhText)
+                    .font(.headline)
+                    .monospacedDigit()
+                Spacer()
+                Text("粗調").font(.caption2).foregroundStyle(Theme.subtext)
+                stepButton("minus", size: 22, width: 60, height: 46) { adjust(-1) }
+                stepButton("plus", size: 22, width: 60, height: 46) { adjust(1) }
+            }
+            HStack {
+                Spacer(minLength: 0)
+                Text("精調 0.1").font(.caption2).foregroundStyle(Theme.subtext)
+                stepButton("minus", size: 15, width: 44, height: 34) { adjust(-0.1) }
+                stepButton("plus", size: 15, width: 44, height: 34) { adjust(0.1) }
+            }
         }
         .foregroundStyle(Theme.accent)
     }
 
-    private func stepButton(_ name: String, _ action: @escaping () -> Void) -> some View {
+    /// 用「整數的十分之一」做運算再除回來，避免重複按加減時浮點數誤差慢慢累積
+    /// （例如 0.1 + 0.2 在 Double 裡不會剛好等於 0.3）。
+    private func adjust(_ delta: Double) {
+        let tenths = (kmh * 10).rounded() + (delta * 10).rounded()
+        kmh = min(range.upperBound, max(range.lowerBound, tenths / 10))
+    }
+
+    private func stepButton(_ name: String, size: CGFloat, width: CGFloat, height: CGFloat,
+                             _ action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: name)
-                .font(.system(size: 22, weight: .bold))
-                .frame(width: 64, height: 48)
+                .font(.system(size: size, weight: .bold))
+                .frame(width: width, height: height)
                 .background(Theme.accentSoft, in: Capsule())
         }
     }

@@ -18,6 +18,7 @@ targets:
           - UIInterfaceOrientationPortrait
         UIBackgroundModes:
           - location
+          - audio
         NSLocationWhenInUseUsageDescription: 用於取得你的原始位置，並在背景維持 App 運作
         NSLocalNetworkUsageDescription: 用於透過本機 VPN 連線到這支手機的開發者服務，以及尋找無線配對服務
         NSBonjourServices:
@@ -29,6 +30,8 @@ targets:
       - sdk: SystemConfiguration.framework
       - sdk: CoreLocation.framework
       - sdk: MapKit.framework
+      - sdk: AVKit.framework
+      - sdk: AVFoundation.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.virtualloc
