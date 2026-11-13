@@ -444,7 +444,15 @@ final class SimulationEngine: ObservableObject {
 
     /// 更新浮動子母畫面視窗裡顯示的進度文字，路線跟搖桿模式都會呼叫，
     /// 時速會放在最前面，跟著 routeKmh／joystickKmh 即時變化。
+    ///
+    /// 這裡同時負責「補開」浮動視窗：如果路線／搖桿已經在跑，但浮動視窗還沒浮出來
+    /// （例如使用者是在路線開始「之後」才去設定頁把開關打開，或是子母畫面上一次
+    /// 嘗試失敗了），每次 tick 呼叫 updatePiPOverlay() 時都會順便再呼叫一次
+    /// PiPOverlay.shared.start()。start() 內部已經檢查「已經在顯示就不重做」，
+    /// 所以這裡重複呼叫沒有副作用，純粹是為了讓它能補救，不用等下一次路線開始／
+    /// 繼續才生效。
     private func updatePiPOverlay() {
+        PiPOverlay.shared.start()
         if mode == .joystick {
             guard joystick != .zero else { return }
             PiPOverlay.shared.update(
@@ -506,26 +514,44 @@ final class SimulationEngine: ObservableObject {
 
     private func onTick() {
         guard connection == .connected else { return }
-
-        // 用「真實經過時間」而不是固定的 tick 常數換算這次要走的距離。
-        // 原本每次都假設剛好經過 0.5 秒，但 Timer 本身會有誤差，加上每次送出定位
-        // 都要等裝置回應（有網路延遲），忙不過來時會把來不及送的中間點直接丟掉、
-        // 只送最新的一個（見 send()），這樣算出來的「兩次定位之間差多少秒」
-        // 會比 0.5 秒長，遊戲端用距離除以時間反推出的時速就會偏低、忽快忽慢。
-        // 改成每次都用真正經過的時間去算距離，不管送出的頻率怎麼抖動，
-        // 距離／時間的比例永遠等於設定的時速，時速才會準。
         let now = Date()
-        let dt = min(now.timeIntervalSince(lastAdvanceTime), tick * 4)   // 上限避免背景過久後一次跳一大段
-        lastAdvanceTime = now
 
+        // 時速準不準，關鍵不是「算距離的公式」，而是「送到裝置的那一刻，距離有沒有算到那一刻」。
+        //
+        // 原本每個 tick（固定 0.5 秒）都會算一次距離、呼叫一次 send()；但送一次定位要等裝置回應，
+        // 碰到網路延遲、送不完的時候，send() 會把來不及送的中間點直接丟掉、只留最新的一個（見
+        // send() 的 pending 機制）。問題是：lastAdvanceTime 當時仍然每 0.5 秒照樣往前推進，
+        // 所以「被丟掉那個點」裡算進去的距離，跟「真正送出去那一刻」之間，其實還多經過了一段
+        // 排隊等待的時間沒被算進去——等於偷偷漏算了一段距離。遊戲端拿「收到的距離」除以「收到
+        // 的時間間隔」反推時速，算出來就會比設定的慢，而且網路忽快忽慢時還會忽快忽慢。
+        //
+        // 修法：只有在「上一次送出已經完成」（!sending）時才去算距離、呼叫 send()；
+        // 還在等裝置回應的那幾個 tick 就先跳過，不去動 lastAdvanceTime。這樣不管中間
+        // 卡了幾個 tick 沒送，下一次真正要送的時候，用的 dt 永遠等於「上一次真正送出」
+        // 到「這一次真正送出」之間，裝置實際收到兩個點的真實時間差，距離／時間的比例
+        // 才會跟設定的時速完全對得起來，不會被網路延遲偷走一段。
+        //
+        // 跳躍收果（hopTick）不是連續移動、沒有「時速」這回事，只是單純倒數停留秒數，
+        // 所以它的倒數改用真實經過時間計算（不再用固定 tick 常數），但不受 !sending 影響——
+        // 停留時間準不準跟「有沒有送成功上一個點」是兩件事，不應該卡在一起。
         switch mode {
         case .route:
             if routeRunning && !routePaused {
-                if hopping { hopTick() } else { advanceRoute(meters: routeKmh / 3.6 * dt) }
+                if hopping {
+                    let dt = now.timeIntervalSince(lastAdvanceTime)
+                    lastAdvanceTime = now
+                    hopTick(dt: dt)
+                } else if !sending {
+                    let dt = min(now.timeIntervalSince(lastAdvanceTime), tick * 8)
+                    lastAdvanceTime = now
+                    advanceRoute(meters: routeKmh / 3.6 * dt)
+                }
                 updatePiPOverlay()
             }
         case .joystick:
-            if joystick != .zero {
+            if joystick != .zero, !sending {
+                let dt = min(now.timeIntervalSince(lastAdvanceTime), tick * 8)
+                lastAdvanceTime = now
                 moveByJoystick(meters: joystickKmh / 3.6 * dt)
                 updatePiPOverlay()
             }
@@ -533,7 +559,7 @@ final class SimulationEngine: ObservableObject {
             break
         }
         // 心跳：每 4 秒重送一次，維持模擬位置
-        if isSpoofing, let c = current, Date().timeIntervalSince(lastSend) >= 4 {
+        if isSpoofing, !sending, let c = current, now.timeIntervalSince(lastSend) >= 4 {
             send(c)
         }
     }
@@ -617,9 +643,10 @@ final class SimulationEngine: ObservableObject {
         }
     }
 
-    /// 種花「點間瞬移」：每隔停留秒數跳到下一個點
-    private func hopTick() {
-        hopElapsed += tick
+    /// 種花「點間瞬移」：每隔停留秒數跳到下一個點。用真實經過時間（dt）累計，
+    /// 不用固定的 tick 常數，才不會因為 Timer 抖動讓停留時間偏長或偏短。
+    private func hopTick(dt: Double) {
+        hopElapsed += dt
         guard hopElapsed >= max(1, hopDwell(at: routeIndex)) else { return }
         hopElapsed = 0
         routeIndex += 1

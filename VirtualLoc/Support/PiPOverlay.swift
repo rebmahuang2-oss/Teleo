@@ -1,6 +1,7 @@
 import AVKit
 import AVFoundation
 import SwiftUI
+import UIKit
 
 /// 讓路線進度能用「子母畫面（Picture in Picture）」的方式浮在其他 App 最上面，
 /// 離開 Teleo（例如切回 Pikmin Bloom）時還能看到走到第幾點、剩多久。
@@ -45,8 +46,16 @@ final class PiPOverlay: NSObject, ObservableObject, AVPictureInPictureController
         callVC.hostingController.rootView = AnyView(PiPOverlayWidgetView(overlay: self))
         self.callVC = callVC
 
-        let view = UIView(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
+        // 「視訊通話」這招的子母畫面，sourceView 一定要真的掛在畫面的 view 階層裡，
+        // 系統才知道這塊畫面在螢幕上的哪個位置、該從哪裡浮出來；如果只是在記憶體裡
+        // 建立一個 UIView、沒有真的 addSubview 到視窗上，startPictureInPicture()
+        // 會悄悄失敗（不一定會丟出明顯的錯誤），結果就是畫面上完全看不到浮動視窗——
+        // 這就是之前「開關打開了，但切去其他 App 沒有懸浮視窗」的原因。
+        let view = UIView(frame: CGRect(x: 0, y: 0, width: 120, height: 42))
+        view.isUserInteractionEnabled = false
+        view.alpha = 0.01
         self.sourceView = view
+        attachSourceViewIfNeeded(view)
 
         let source = AVPictureInPictureController.ContentSource(
             activeVideoCallSourceView: view,
@@ -57,10 +66,22 @@ final class PiPOverlay: NSObject, ObservableObject, AVPictureInPictureController
         self.pip = controller
     }
 
+    /// 把 sourceView 掛到目前最上層的視窗上（alpha 很低、不接受互動，幾乎看不見），
+    /// 子母畫面才找得到它該浮在哪個位置。如果呼叫當下視窗還沒準備好就先放棄，
+    /// 下次呼叫 start() 時會再試一次，不會卡住。
+    private func attachSourceViewIfNeeded(_ view: UIView) {
+        guard view.superview == nil else { return }
+        guard let window = UIApplication.shared.connectedScenes
+            .compactMap({ ($0 as? UIWindowScene)?.windows.first(where: { $0.isKeyWindow }) })
+            .first else { return }
+        window.addSubview(view)
+    }
+
     /// 開始浮動（通常在路線開始跑、或 App 要切到背景時呼叫）。
     func start() {
         guard enabled else { return }
         prepare()
+        if let sourceView { attachSourceViewIfNeeded(sourceView) }
         guard let pip, !pip.isPictureInPictureActive else { return }
         startSilentAudio()
         pip.startPictureInPicture()
