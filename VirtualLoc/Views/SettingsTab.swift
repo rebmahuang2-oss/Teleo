@@ -112,6 +112,8 @@ struct SettingsTab: View {
                     NavigationLink("使用步驟") { HelpView() }
                 }
             }
+            .scrollContentBackground(.hidden)
+            .background(Theme.sheetBackground)
             .navigationTitle("設定")
             .navigationBarTitleDisplayMode(.inline)
         }
@@ -151,9 +153,11 @@ struct LogView: View {
             Text(log.lines.isEmpty ? "目前沒有紀錄" : log.text)
                 .font(.system(.caption, design: .monospaced))
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding()
                 .textSelection(.enabled)
+                .card()
+                .padding()
         }
+        .background(Theme.sheetBackground)
         .navigationTitle("錯誤日誌")
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
@@ -190,8 +194,10 @@ struct HelpView: View {
                 """)
                 .font(.callout)
             }
+            .card()
             .padding()
         }
+        .background(Theme.sheetBackground)
         .navigationTitle("使用步驟")
     }
 }

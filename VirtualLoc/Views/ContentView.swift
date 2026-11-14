@@ -135,8 +135,8 @@ struct ContentView: View {
                 .foregroundStyle(Theme.warn)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
-                .background(Theme.surface.opacity(0.96), in: Capsule())
-                .overlay(Capsule().stroke(Theme.warn.opacity(0.7), lineWidth: 2))
+                .glass(Capsule(), tint: Theme.warn, tintOpacity: 0.18)
+                .overlay(Capsule().stroke(Theme.warn.opacity(0.7), lineWidth: 1.5))
                 .opacity(active ? 1 : 0.55)
         }
         .disabled(!active)
@@ -293,8 +293,7 @@ struct BottomBar: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 8)
-        .background(Theme.surface.opacity(0.96), in: Capsule())
-        .shadow(color: .black.opacity(0.12), radius: 8, y: 2)
+        .glass(Capsule(), shadowRadius: 12, shadowY: 4)
     }
 
     private func item(_ icon: String, _ title: String, selected: Bool, _ action: @escaping () -> Void) -> some View {

@@ -23,7 +23,16 @@ struct FavoritesTab: View {
                 }
             }
             .listStyle(.plain)
+            .scrollContentBackground(.hidden)
         }
+        .background(Theme.sheetBackground)
+    }
+
+    /// 每一列的玻璃卡片底，取代原本列表預設的白底。
+    private func rowGlass() -> some View {
+        RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .fill(.ultraThinMaterial)
+            .padding(.vertical, 3)
     }
 
     @ViewBuilder private var placesList: some View {
@@ -43,6 +52,8 @@ struct FavoritesTab: View {
                 }
                 .buttonStyle(.borderless)
             }
+            .listRowSeparator(.hidden)
+            .listRowBackground(rowGlass())
         }
         .onDelete { store.places.remove(atOffsets: $0) }
     }
@@ -60,6 +71,8 @@ struct FavoritesTab: View {
                 Button("載入") { engine.setRoute(r.coords) }
                     .buttonStyle(.borderless)
             }
+            .listRowSeparator(.hidden)
+            .listRowBackground(rowGlass())
         }
         .onDelete { store.routes.remove(atOffsets: $0) }
     }
@@ -83,10 +96,14 @@ struct FavoritesTab: View {
                 }
                 .buttonStyle(.borderless)
             }
+            .listRowSeparator(.hidden)
+            .listRowBackground(rowGlass())
         }
         .onDelete { store.history.remove(atOffsets: $0) }
         if !store.history.isEmpty {
             Button("清除歷史", role: .destructive) { store.clearHistory() }
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
         }
     }
 }
