@@ -25,7 +25,10 @@ final class PiPOverlay: NSObject, ObservableObject, AVPictureInPictureController
     @Published var isActive = false
     @Published var title = "Teleo"
     @Published var subtitle = ""
+    @Published var speedText = ""
     @Published var isPaused = false
+    /// 路線完成度 0...1；搖桿模式或沒有固定路線時是 nil，不顯示進度條。
+    @Published var progress: Double?
 
     /// 使用者是否想要這個功能（設定頁開關），預設關閉，因為會持續耗一點電。
     @AppStorage("pipOverlayEnabled") var enabled = false
@@ -51,7 +54,7 @@ final class PiPOverlay: NSObject, ObservableObject, AVPictureInPictureController
         // 建立一個 UIView、沒有真的 addSubview 到視窗上，startPictureInPicture()
         // 會悄悄失敗（不一定會丟出明顯的錯誤），結果就是畫面上完全看不到浮動視窗——
         // 這就是之前「開關打開了，但切去其他 App 沒有懸浮視窗」的原因。
-        let view = UIView(frame: CGRect(x: 0, y: 0, width: 120, height: 42))
+        let view = UIView(frame: CGRect(x: 0, y: 0, width: 150, height: 36))
         view.isUserInteractionEnabled = false
         view.alpha = 0.01
         self.sourceView = view
@@ -93,10 +96,14 @@ final class PiPOverlay: NSObject, ObservableObject, AVPictureInPictureController
     }
 
     /// 更新浮動列顯示的文字內容。
-    func update(title: String, subtitle: String, isPaused: Bool) {
+    /// - speedText：目前時速，放大顯示在最醒目的位置。
+    /// - progress：路線完成度 0...1，傳 nil 就不顯示進度條（例如搖桿模式）。
+    func update(title: String, subtitle: String, speedText: String, isPaused: Bool, progress: Double? = nil) {
         self.title = title
         self.subtitle = subtitle
+        self.speedText = speedText
         self.isPaused = isPaused
+        self.progress = progress
         // 使用者在路線跑的途中，到設定頁把開關關掉的話，這裡會順便把正在顯示的浮動視窗收起來，
         // 不用等下一次路線開始/結束才生效。
         if !enabled, pip?.isPictureInPictureActive == true { stop() }
@@ -175,7 +182,9 @@ final class PiPCallViewController: AVPictureInPictureVideoCallViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        preferredContentSize = CGSize(width: 260, height: 90)
+        // 拉長成細長的一條浮動列（原本偏方形的 260×90），切到其他 App 時比較不會
+        // 擋住畫面中間，視覺上也更像一般通知列／狀態列，而不是一塊方塊貼在螢幕上。
+        preferredContentSize = CGSize(width: 320, height: 76)
         view.backgroundColor = .black
         addChild(hostingController)
         hostingController.view.backgroundColor = .clear

@@ -29,6 +29,8 @@ final class SimulationEngine: ObservableObject {
     @Published private(set) var segProgress = 0.0
     @Published private(set) var routeRunning = false
     @Published private(set) var routePaused = false
+    /// 路線開始那一刻的總長度，只用來給浮動視窗算完成度（0...1），不隨路線進行變動。
+    private var routeTotalMeters: Double = 0
     enum RouteRepeat: String, CaseIterable {
         case once = "單次", pingPong = "往返", loop = "循環"
     }
@@ -398,6 +400,7 @@ final class SimulationEngine: ObservableObject {
         lapLimit = laps
         lapsDone = 0
         hopElapsed = 0
+        routeTotalMeters = Geo.pathLength(route)
         hopping = laps != nil && ((flowerHop && !farmMode) || hopRoute)
         routeRunning = true
         routePaused = false
@@ -457,20 +460,30 @@ final class SimulationEngine: ObservableObject {
             guard joystick != .zero else { return }
             PiPOverlay.shared.update(
                 title: "搖桿中 · Teleo",
-                subtitle: "\(joystickKmh.kmhText) · 持續送出定位",
-                isPaused: false)
+                subtitle: "持續送出定位",
+                speedText: joystickKmh.kmhText,
+                isPaused: false,
+                progress: nil)
             return
         }
         guard routeRunning else { return }
         let title = routePaused ? "已暫停 · Teleo" : "進行中 · Teleo"
-        var parts = [routeKmh.kmhText, "第 \(routeIndex + 1) / \(route.count) 點"]
+        var parts = ["第 \(routeIndex + 1) / \(route.count) 點"]
         if let farmText = farmProgressText { parts.append(farmText) }
         if let hopText = hopProgressText { parts.append(hopText) }
         if let laps = lapsTotalText { parts.append(laps) }
         if !routePaused {
             parts.append("剩 \(remainingMeters.distanceText) · 約 \(remainingSeconds.durationText)")
         }
-        PiPOverlay.shared.update(title: title, subtitle: parts.joined(separator: " · "), isPaused: routePaused)
+        let progress: Double? = routeTotalMeters > 0
+            ? min(1, max(0, 1 - remainingMeters / routeTotalMeters))
+            : nil
+        PiPOverlay.shared.update(
+            title: title,
+            subtitle: parts.joined(separator: " · "),
+            speedText: routeKmh.kmhText,
+            isPaused: routePaused,
+            progress: progress)
     }
 
     func nextPoint() {
