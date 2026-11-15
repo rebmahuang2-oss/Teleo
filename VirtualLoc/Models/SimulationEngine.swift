@@ -56,6 +56,9 @@ final class SimulationEngine: ObservableObject {
     private var hopRoute = false
     private var hopDwells: [Double] = []
     var hopRouteActive: Bool { hopRoute }
+    // 跳躍拉金盆：依序跳到每個點，但不自動倒數，完全靠「上一點／下一點」手動控制
+    private var hopManual = false
+    var hopRouteManual: Bool { hopManual }
     @Published private(set) var lapsDone = 0
     @Published var routeKmh: Double = 5
     @Published var joystickKmh: Double = 8
@@ -93,6 +96,17 @@ final class SimulationEngine: ObservableObject {
                 guard let self else { return }
                 if self.routePaused { self.resumeRoute() } else { self.pauseRoute() }
             }
+        }
+        // 浮動視窗上的「上一點／下一點」，給跳躍類路線（跳躍收果／跳躍拉金盆）手動切換用。
+        NotificationCenter.default.addObserver(
+            forName: .teleoPiPNext, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.nextPoint() }
+        }
+        NotificationCenter.default.addObserver(
+            forName: .teleoPiPPrev, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.previousPoint() }
         }
     }
 
@@ -324,13 +338,34 @@ final class SimulationEngine: ObservableObject {
         return route.count
     }
 
+    // MARK: 跳躍拉金盆
+
+    /// 依序跳到每個點，但完全不自動倒數換點——跳到第一個點之後就停在那裡，
+    /// 要換下一個點得按「下一點」（資訊卡上的按鈕，或浮動視窗上那個往前跳的按鈕）。
+    /// 用在那種「跳過去、在遊戲裡手動收集完才要換下一個點」的情境，秒數沒辦法事先訂死。
+    @discardableResult
+    func buildJumpRoute(points: [Coord]) -> Int {
+        stopRoute()
+        invalidateFarm()
+        route = Array(points.prefix(SimulationEngine.routeLimit))
+        hopDwells = []
+        hopRoute = true
+        hopManual = true
+        message = "已產生跳躍拉金盆路線：\(route.count) 個點"
+        return route.count
+    }
+
     private func hopDwell(at index: Int) -> Double {
         hopRoute && index < hopDwells.count ? hopDwells[index] : flowerDwell
     }
 
-    /// 跳躍收果進行中的進度，例如「第 3 / 12 點 · 停留 8 秒」
+    /// 跳躍收果／跳躍拉金盆進行中的進度文字。
+    /// 手動模式（跳躍拉金盆）不會自動倒數，所以不顯示秒數，改提示要按按鈕換點。
     var hopProgressText: String? {
         guard hopRoute, routeRunning, routeIndex < route.count else { return nil }
+        if hopManual {
+            return "第 \(routeIndex + 1) / \(route.count) 點 · 按下一點換點"
+        }
         let left = max(0, Int(hopDwell(at: routeIndex) - hopElapsed))
         return "第 \(routeIndex + 1) / \(route.count) 點 · 剩 \(left) 秒換下一點"
     }
@@ -437,6 +472,7 @@ final class SimulationEngine: ObservableObject {
     func stopRoute() {
         lapLimit = nil
         hopping = false
+        hopManual = false
         routeRunning = false
         routePaused = false
         routeIndex = 0
@@ -483,20 +519,29 @@ final class SimulationEngine: ObservableObject {
             subtitle: parts.joined(separator: " · "),
             speedText: routeKmh.kmhText,
             isPaused: routePaused,
-            progress: progress)
+            progress: progress,
+            // 跳躍類路線（跳躍收果／跳躍拉金盆）才在浮動視窗上顯示「上一點／下一點」，
+            // 一般走路路線沒有「點」這個概念可以跳。
+            showStepControls: hopping)
     }
 
+    /// 手動跳到下一個點：跳躍拉金盆就是靠這個（配合浮動視窗上的按鈕），
+    /// 不等任何倒數，按下去立刻送出下一個點的座標。
     func nextPoint() {
         guard routeRunning else { return }
         routeIndex = min(route.count - 1, routeIndex + 1)
         segProgress = 0
+        hopElapsed = 0
         send(route[routeIndex])
+        updatePiPOverlay()
     }
 
     func previousPoint() {
         guard routeRunning else { return }
         if segProgress > 0 { segProgress = 0 } else { routeIndex = max(0, routeIndex - 1) }
+        hopElapsed = 0
         send(route[routeIndex])
+        updatePiPOverlay()
     }
 
     var remainingMeters: Double {
@@ -659,6 +704,8 @@ final class SimulationEngine: ObservableObject {
     /// 種花「點間瞬移」：每隔停留秒數跳到下一個點。用真實經過時間（dt）累計，
     /// 不用固定的 tick 常數，才不會因為 Timer 抖動讓停留時間偏長或偏短。
     private func hopTick(dt: Double) {
+        // 跳躍拉金盆：完全手動，不自動倒數換點，只能靠「上一點／下一點」按鈕。
+        guard !hopManual else { return }
         hopElapsed += dt
         guard hopElapsed >= max(1, hopDwell(at: routeIndex)) else { return }
         hopElapsed = 0

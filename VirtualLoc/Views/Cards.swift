@@ -169,13 +169,14 @@ struct RouteCard: View {
     @State private var showFlowerSettings = false
     @State private var showFarm = false
     @State private var showHop = false
+    @State private var showJump = false
     @State private var appendToRoute = false
     @State private var pasteText = ""
     @State private var saveName = ""
     @State private var startText = ""
 
     private var title: String { flower ? "種花" : "路線" }
-    private var hopping: Bool { (flower && engine.flowerHop) || engine.hopRouteActive }
+    private var hopping: Bool { (flower && engine.flowerHop) || engine.hopRouteActive || engine.hopRouteManual }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -225,6 +226,10 @@ struct RouteCard: View {
                             }
                             .buttonStyle(SoftButtonStyle())
                         }
+                        Button { showJump = true } label: {
+                            Label("跳躍拉金盆", systemImage: "hand.tap.fill")
+                        }
+                        .buttonStyle(SoftButtonStyle())
                     }
                     Button { pasteText = ""; showPaste = true } label: {
                         Label("輸入多筆座標", systemImage: "list.bullet.rectangle")
@@ -269,6 +274,7 @@ struct RouteCard: View {
         .sheet(isPresented: $showFlowerSettings) { FlowerSettingsSheet() }
         .sheet(isPresented: $showFarm) { FarmSheet() }
         .sheet(isPresented: $showHop) { HopSheet() }
+        .sheet(isPresented: $showJump) { JumpSheet() }
         .alert("儲存路線", isPresented: $showSave) {
             TextField("名稱", text: $saveName)
             Button("儲存") {

@@ -49,23 +49,31 @@ struct PiPOverlayWidgetView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            // 右：大字時速 + 暫停/繼續按鈕
+            // 右：大字時速 + 操作按鈕。
+            // 跳躍類路線（跳躍收果／跳躍拉金盆）才會多出「上一點／下一點」，
+            // 用跟系統「快轉/倒轉」同一套圖示（goforward/gobackward），
+            // 按下去是立刻跳到下一個點，不是等 30 秒——圖示只是借來長得像而已。
             VStack(alignment: .trailing, spacing: 6) {
                 Text(overlay.speedText)
                     .font(.system(size: 17, weight: .bold, design: .rounded))
                     .foregroundStyle(accent)
                     .monospacedDigit()
                     .lineLimit(1)
-                Button {
-                    NotificationCenter.default.post(name: .teleoPiPToggle, object: nil)
-                } label: {
-                    Image(systemName: overlay.isPaused ? "play.fill" : "pause.fill")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundColor(.white)
-                        .frame(width: 30, height: 30)
-                        .background(Circle().fill(Color.white.opacity(0.14)))
+                HStack(spacing: 6) {
+                    if overlay.showStepControls {
+                        pipButton("gobackward.30", size: 15) {
+                            NotificationCenter.default.post(name: .teleoPiPPrev, object: nil)
+                        }
+                    }
+                    pipButton(overlay.isPaused ? "play.fill" : "pause.fill", size: 13) {
+                        NotificationCenter.default.post(name: .teleoPiPToggle, object: nil)
+                    }
+                    if overlay.showStepControls {
+                        pipButton("goforward.30", size: 15) {
+                            NotificationCenter.default.post(name: .teleoPiPNext, object: nil)
+                        }
+                    }
                 }
-                .buttonStyle(.plain)
             }
         }
         .padding(.horizontal, 14)
@@ -83,9 +91,24 @@ struct PiPOverlayWidgetView: View {
             alignment: .top
         )
     }
+
+    private func pipButton(_ systemName: String, size: CGFloat, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: size, weight: .bold))
+                .foregroundColor(.white)
+                .frame(width: 28, height: 28)
+                .background(Circle().fill(Color.white.opacity(0.14)))
+        }
+        .buttonStyle(.plain)
+    }
 }
 
 extension Notification.Name {
     /// 浮動視窗上的播放／暫停按鈕被按下
     static let teleoPiPToggle = Notification.Name("teleoPiPToggle")
+    /// 浮動視窗上的「下一點」被按下（跳躍類路線用）
+    static let teleoPiPNext = Notification.Name("teleoPiPNext")
+    /// 浮動視窗上的「上一點」被按下（跳躍類路線用）
+    static let teleoPiPPrev = Notification.Name("teleoPiPPrev")
 }
