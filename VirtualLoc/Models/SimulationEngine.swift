@@ -89,6 +89,11 @@ final class SimulationEngine: ObservableObject {
 
     init() {
         autoConnect = UserDefaults.standard.object(forKey: "autoConnect") as? Bool ?? true
+        // 浮動視窗上的暫停/繼續、上一點、下一點，是用「原生 UIButton」直接加在
+        // 子母畫面內容的 UIKit 畫面上（不是 SwiftUI 畫的），這樣按下去才會被我們
+        // 自己的按鈕收到，而不是被系統「點一下恢復 App」的手勢攔截。細節見
+        // PiPOverlay.swift 裡 PiPCallViewController 的說明。這裡監聽那幾個按鈕
+        // 送出的通知，轉呼叫對應的功能。
         NotificationCenter.default.addObserver(
             forName: .teleoPiPToggle, object: nil, queue: .main
         ) { [weak self] _ in
@@ -97,7 +102,6 @@ final class SimulationEngine: ObservableObject {
                 if self.routePaused { self.resumeRoute() } else { self.pauseRoute() }
             }
         }
-        // 浮動視窗上的「上一點／下一點」，給跳躍類路線（跳躍收果／跳躍拉金盆）手動切換用。
         NotificationCenter.default.addObserver(
             forName: .teleoPiPNext, object: nil, queue: .main
         ) { [weak self] _ in
@@ -520,13 +524,14 @@ final class SimulationEngine: ObservableObject {
             speedText: routeKmh.kmhText,
             isPaused: routePaused,
             progress: progress,
-            // 跳躍類路線（跳躍收果／跳躍拉金盆）才在浮動視窗上顯示「上一點／下一點」，
-            // 一般走路路線沒有「點」這個概念可以跳。
-            showStepControls: hopping)
+            // 只有「跳躍拉金盆」（手動模式）才在浮動視窗上顯示「上一點／下一點」。
+            // 跳躍收果本來就會自動倒數換點，不需要這兩顆按鈕。
+            showStepControls: hopManual)
     }
 
-    /// 手動跳到下一個點：跳躍拉金盆就是靠這個（配合浮動視窗上的按鈕），
-    /// 不等任何倒數，按下去立刻送出下一個點的座標。
+    /// 手動跳到下一個點：跳躍拉金盆就是靠這個——資訊卡上的「下一點」按鈕，
+    /// 或浮動視窗上那顆往前跳的按鈕都是呼叫這個。不等任何倒數，按下去立刻
+    /// 送出下一個點的座標。
     func nextPoint() {
         guard routeRunning else { return }
         routeIndex = min(route.count - 1, routeIndex + 1)

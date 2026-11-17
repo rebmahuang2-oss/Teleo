@@ -1,8 +1,15 @@
 import SwiftUI
 
-/// 浮在子母畫面視窗裡的內容。拉長成一條細長的狀態列（320×76），
+/// 浮在子母畫面視窗裡「純顯示」的部分：狀態圖示、標題／字幕、進度條、時速。
 /// 風格比照主畫面的膠囊卡片：深色底、teal 強調色、圓角分層，
 /// 而不是隨便貼一塊黑底文字上去。
+///
+/// 暫停/繼續、上一點、下一點那三顆按鈕「不」在這個檔案裡——它們是原生 UIButton，
+/// 直接加在 `PiPOverlay.swift` 的 `PiPCallViewController` 的 UIKit 畫面上，
+/// 疊在這層 SwiftUI 畫面之上。細節跟原因（為什麼按鈕不能用 SwiftUI 的 Button
+/// 做）見 `PiPCallViewController` 開頭的註解。
+/// 這裡右下角特意留白（時速文字對齊上方、下面用 Spacer 撐開），就是留給那幾顆
+/// 原生按鈕疊上去的位置，排版時兩邊要對著改。
 struct PiPOverlayWidgetView: View {
     @ObservedObject var overlay: PiPOverlay
 
@@ -49,31 +56,14 @@ struct PiPOverlayWidgetView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            // 右：大字時速 + 操作按鈕。
-            // 跳躍類路線（跳躍收果／跳躍拉金盆）才會多出「上一點／下一點」，
-            // 用跟系統「快轉/倒轉」同一套圖示（goforward/gobackward），
-            // 按下去是立刻跳到下一個點，不是等 30 秒——圖示只是借來長得像而已。
-            VStack(alignment: .trailing, spacing: 6) {
+            // 右：大字時速，貼齊上緣。下面特意留白，是原生按鈕疊上去的位置。
+            VStack(alignment: .trailing, spacing: 0) {
                 Text(overlay.speedText)
-                    .font(.system(size: 17, weight: .bold, design: .rounded))
+                    .font(.system(size: 19, weight: .bold, design: .rounded))
                     .foregroundStyle(accent)
                     .monospacedDigit()
                     .lineLimit(1)
-                HStack(spacing: 6) {
-                    if overlay.showStepControls {
-                        pipButton("gobackward.30", size: 15) {
-                            NotificationCenter.default.post(name: .teleoPiPPrev, object: nil)
-                        }
-                    }
-                    pipButton(overlay.isPaused ? "play.fill" : "pause.fill", size: 13) {
-                        NotificationCenter.default.post(name: .teleoPiPToggle, object: nil)
-                    }
-                    if overlay.showStepControls {
-                        pipButton("goforward.30", size: 15) {
-                            NotificationCenter.default.post(name: .teleoPiPNext, object: nil)
-                        }
-                    }
-                }
+                Spacer(minLength: 0)
             }
         }
         .padding(.horizontal, 14)
@@ -91,24 +81,4 @@ struct PiPOverlayWidgetView: View {
             alignment: .top
         )
     }
-
-    private func pipButton(_ systemName: String, size: CGFloat, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: systemName)
-                .font(.system(size: size, weight: .bold))
-                .foregroundColor(.white)
-                .frame(width: 28, height: 28)
-                .background(Circle().fill(Color.white.opacity(0.14)))
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-extension Notification.Name {
-    /// 浮動視窗上的播放／暫停按鈕被按下
-    static let teleoPiPToggle = Notification.Name("teleoPiPToggle")
-    /// 浮動視窗上的「下一點」被按下（跳躍類路線用）
-    static let teleoPiPNext = Notification.Name("teleoPiPNext")
-    /// 浮動視窗上的「上一點」被按下（跳躍類路線用）
-    static let teleoPiPPrev = Notification.Name("teleoPiPPrev")
 }

@@ -2,6 +2,16 @@ import AVKit
 import AVFoundation
 import SwiftUI
 import UIKit
+import Combine
+
+extension Notification.Name {
+    /// 浮動視窗上的暫停／繼續按鈕被按下
+    static let teleoPiPToggle = Notification.Name("teleoPiPToggle")
+    /// 浮動視窗上的「下一點」被按下（跳躍拉金盆用）
+    static let teleoPiPNext = Notification.Name("teleoPiPNext")
+    /// 浮動視窗上的「上一點」被按下（跳躍拉金盆用）
+    static let teleoPiPPrev = Notification.Name("teleoPiPPrev")
+}
 
 /// 讓路線進度能用「子母畫面（Picture in Picture）」的方式浮在其他 App 最上面，
 /// 離開 Teleo（例如切回 Pikmin Bloom）時還能看到走到第幾點、剩多久。
@@ -29,7 +39,7 @@ final class PiPOverlay: NSObject, ObservableObject, AVPictureInPictureController
     @Published var isPaused = false
     /// 路線完成度 0...1；搖桿模式或沒有固定路線時是 nil，不顯示進度條。
     @Published var progress: Double?
-    /// 跳躍類路線（跳躍收果／跳躍拉金盆）才會是 true，浮動視窗上才會多出「上一點／下一點」按鈕。
+    /// 跳躍拉金盆才會是 true，浮動視窗上才會多出「上一點／下一點」按鈕。
     @Published var showStepControls = false
 
     /// 使用者是否想要這個功能（設定頁開關），預設關閉，因為會持續耗一點電。
@@ -49,6 +59,7 @@ final class PiPOverlay: NSObject, ObservableObject, AVPictureInPictureController
 
         let callVC = PiPCallViewController()
         callVC.hostingController.rootView = AnyView(PiPOverlayWidgetView(overlay: self))
+        callVC.bind(to: self)
         self.callVC = callVC
 
         // 「視訊通話」這招的子母畫面，sourceView 一定要真的掛在畫面的 view 階層裡，
@@ -100,7 +111,7 @@ final class PiPOverlay: NSObject, ObservableObject, AVPictureInPictureController
     /// 更新浮動列顯示的文字內容。
     /// - speedText：目前時速，放大顯示在最醒目的位置。
     /// - progress：路線完成度 0...1，傳 nil 就不顯示進度條（例如搖桿模式）。
-    /// - showStepControls：是否顯示「上一點／下一點」按鈕（跳躍類路線才需要）。
+    /// - showStepControls：是否顯示「上一點／下一點」按鈕（跳躍拉金盆才需要）。
     func update(title: String, subtitle: String, speedText: String, isPaused: Bool,
                 progress: Double? = nil, showStepControls: Bool = false) {
         self.title = title
@@ -180,20 +191,42 @@ final class PiPOverlay: NSObject, ObservableObject, AVPictureInPictureController
     }
 }
 
-/// 子母畫面要求內容是 `AVPictureInPictureVideoCallViewController` 的子類別，
-/// 裡面放的是我們自己的 SwiftUI 畫面。
+/// 子母畫面要求內容是 `AVPictureInPictureVideoCallViewController` 的子類別。
+/// 純顯示的部分（圖示、標題、進度條、時速）用 SwiftUI 畫，但「按鈕」故意
+/// 不透過 SwiftUI：第一版把暫停/上一點/下一點也做成 SwiftUI 的 `Button`，結果
+/// 實機測試每一顆按下去都直接跳回 Teleo，不會真的執行動作。
+///
+/// 原因不是「子母畫面本身不能有按鈕」——FaceTime、Zoom 這類 App 在子母畫面裡
+/// 都有能正常運作的靜音／掛斷按鈕，Apple 的官方範例也展示過一樣的用法，
+/// 所以這條路一定走得通，是我們原本的做法不對：用 `UIHostingController` 包
+/// SwiftUI 的 `Button` 放進這種「視訊通話」子母畫面時，觸控沒有正確被那個
+/// Button 的手勢辨識器吃掉，就這樣被系統預設的「點一下恢復 App」手勢撿走了。
+/// 修法是回到最原生的做法：按鈕直接用 `UIButton` 加在這個 UIKit 的 `view` 上，
+/// 跟 Apple 官方範例的做法一致，觸控才會確實被我們自己的按鈕收到，不會被系統
+/// 攔截去恢復 App。
 final class PiPCallViewController: AVPictureInPictureVideoCallViewController {
     let hostingController = UIHostingController(rootView: AnyView(EmptyView()))
+    private var cancellables = Set<AnyCancellable>()
+
+    // 往前/往後 30 秒是最常按的兩顆，特意做得比暫停/繼續更大一點，比較好點。
+    private lazy var prevButton = PiPCallViewController.makeButton("gobackward.30", size: 40, iconPointSize: 17)
+    private lazy var toggleButton = PiPCallViewController.makeButton("pause.fill", size: 32, iconPointSize: 14)
+    private lazy var nextButton = PiPCallViewController.makeButton("goforward.30", size: 40, iconPointSize: 17)
 
     override func viewDidLoad() {
         super.viewDidLoad()
         // 拉長成細長的一條浮動列（原本偏方形的 260×90），切到其他 App 時比較不會
         // 擋住畫面中間，視覺上也更像一般通知列／狀態列，而不是一塊方塊貼在螢幕上。
-        // 寬度留寬一點（340），跳躍類路線顯示「上一點／下一點」按鈕時才不會太擠。
-        preferredContentSize = CGSize(width: 340, height: 76)
+        // 寬度留寬一點（340），跳躍拉金盆顯示「上一點／下一點」按鈕時才不會太擠；
+        // 高度跟著放大的按鈕（40pt）一起加高，底部才有足夠空間不會被切到。
+        preferredContentSize = CGSize(width: 340, height: 84)
         view.backgroundColor = .black
+
         addChild(hostingController)
         hostingController.view.backgroundColor = .clear
+        // 純顯示的那層不接受觸控，底下的 UIButton 才能優先收到點擊，
+        // 不會被這層 SwiftUI 畫面擋掉（即使它視覺上蓋在按鈕下面也一樣）。
+        hostingController.view.isUserInteractionEnabled = false
         view.addSubview(hostingController.view)
         hostingController.view.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
@@ -203,5 +236,56 @@ final class PiPCallViewController: AVPictureInPictureVideoCallViewController {
             hostingController.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
         ])
         hostingController.didMove(toParent: self)
+
+        let stack = UIStackView(arrangedSubviews: [prevButton, toggleButton, nextButton])
+        stack.axis = .horizontal
+        stack.alignment = .center
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
+            stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -8),
+        ])
+
+        prevButton.addTarget(self, action: #selector(tapPrev), for: .touchUpInside)
+        toggleButton.addTarget(self, action: #selector(tapToggle), for: .touchUpInside)
+        nextButton.addTarget(self, action: #selector(tapNext), for: .touchUpInside)
     }
+
+    /// 訂閱 overlay 的狀態，更新按鈕的圖示／是否顯示。
+    func bind(to overlay: PiPOverlay) {
+        overlay.$isPaused
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] paused in
+                self?.toggleButton.setImage(UIImage(systemName: paused ? "play.fill" : "pause.fill"), for: .normal)
+            }
+            .store(in: &cancellables)
+        overlay.$showStepControls
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] show in
+                self?.prevButton.isHidden = !show
+                self?.nextButton.isHidden = !show
+            }
+            .store(in: &cancellables)
+    }
+
+    private static func makeButton(_ systemName: String, size: CGFloat, iconPointSize: CGFloat) -> UIButton {
+        let b = UIButton(type: .system)
+        let config = UIImage.SymbolConfiguration(pointSize: iconPointSize, weight: .semibold)
+        b.setImage(UIImage(systemName: systemName, withConfiguration: config), for: .normal)
+        b.tintColor = .white
+        b.backgroundColor = UIColor.white.withAlphaComponent(0.14)
+        b.layer.cornerRadius = size / 2
+        b.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            b.widthAnchor.constraint(equalToConstant: size),
+            b.heightAnchor.constraint(equalToConstant: size),
+        ])
+        return b
+    }
+
+    @objc private func tapPrev() { NotificationCenter.default.post(name: .teleoPiPPrev, object: nil) }
+    @objc private func tapToggle() { NotificationCenter.default.post(name: .teleoPiPToggle, object: nil) }
+    @objc private func tapNext() { NotificationCenter.default.post(name: .teleoPiPNext, object: nil) }
 }
