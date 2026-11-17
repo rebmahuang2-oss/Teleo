@@ -1,15 +1,16 @@
 import SwiftUI
 
-/// 浮在子母畫面視窗裡「純顯示」的部分：狀態圖示、標題／字幕、進度條、時速。
+/// 浮在子母畫面視窗裡的畫面：狀態圖示、標題／字幕、進度條、時速。
 /// 風格比照主畫面的膠囊卡片：深色底、teal 強調色、圓角分層，
 /// 而不是隨便貼一塊黑底文字上去。
 ///
-/// 暫停/繼續、上一點、下一點那三顆按鈕「不」在這個檔案裡——它們是原生 UIButton，
-/// 直接加在 `PiPOverlay.swift` 的 `PiPCallViewController` 的 UIKit 畫面上，
-/// 疊在這層 SwiftUI 畫面之上。細節跟原因（為什麼按鈕不能用 SwiftUI 的 Button
-/// 做）見 `PiPCallViewController` 開頭的註解。
-/// 這裡右下角特意留白（時速文字對齊上方、下面用 Spacer 撐開），就是留給那幾顆
-/// 原生按鈕疊上去的位置，排版時兩邊要對著改。
+/// 這個畫面不是「真的疊在系統畫面上」，而是被 `PiPOverlay.swift` 用
+/// `ImageRenderer` 定期拍成一張圖，當作「影片畫面」餵給系統的子母畫面
+/// （`AVSampleBufferDisplayLayer`）。暫停/繼續、上一點、下一點三顆按鈕
+/// 刻意「不」畫在這裡——交給系統自己畫播放控制列（跟 Podcast / 影片 App
+/// 子母畫面上那排按鈕一樣），這樣按下去才會確實被系統接住、執行動作，
+/// 而不是被系統「點一下恢復 App」的手勢搶走。原因跟細節見
+/// `PiPOverlay.swift` 開頭的註解。
 struct PiPOverlayWidgetView: View {
     @ObservedObject var overlay: PiPOverlay
 

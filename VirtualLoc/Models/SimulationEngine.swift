@@ -89,11 +89,11 @@ final class SimulationEngine: ObservableObject {
 
     init() {
         autoConnect = UserDefaults.standard.object(forKey: "autoConnect") as? Bool ?? true
-        // 浮動視窗上的暫停/繼續、上一點、下一點，是用「原生 UIButton」直接加在
-        // 子母畫面內容的 UIKit 畫面上（不是 SwiftUI 畫的），這樣按下去才會被我們
-        // 自己的按鈕收到，而不是被系統「點一下恢復 App」的手勢攔截。細節見
-        // PiPOverlay.swift 裡 PiPCallViewController 的說明。這裡監聽那幾個按鈕
-        // 送出的通知，轉呼叫對應的功能。
+        // 浮動視窗上的暫停/繼續、上一點、下一點，是系統「播放樣式」子母畫面
+        // 自己畫、自己接住點擊的播放控制列（不是我們自己畫的按鈕），這樣浮在
+        // 別的 App 上面時按下去才會真的被系統接住、不會被「點一下恢復 App」
+        // 的手勢攔截。細節見 PiPOverlay.swift 開頭的說明。這裡監聽那幾個
+        // 控制列動作轉成的通知，轉呼叫對應的功能。
         NotificationCenter.default.addObserver(
             forName: .teleoPiPToggle, object: nil, queue: .main
         ) { [weak self] _ in
