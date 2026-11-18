@@ -1,0 +1,75 @@
+workflows:
+  unsigned-ipa:
+    name: Build unsigned IPA
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+    environment:
+      vars:
+        # 已讀過原始碼並據此撰寫橋接程式的 idevice 版本；更新版本前請先確認 API 沒變
+        IDEVICE_REF: "89702099f4d7552f704f93b4526756abda319ceb"
+
+    scripts:
+      - name: Checkout idevice
+        script: |
+          set -euo pipefail
+          git clone https://github.com/jkcoxson/idevice.git idevice
+          cd idevice
+          git fetch --depth 1 origin "$IDEVICE_REF"
+          git checkout "$IDEVICE_REF"
+
+      - name: Install Rust target (aarch64-apple-ios)
+        script: |
+          set -euo pipefail
+          rustup target add aarch64-apple-ios
+
+      - name: Build idevice (iOS device static library)
+        script: |
+          set -euo pipefail
+          cd idevice/ffi
+          export BINDGEN_EXTRA_CLANG_ARGS="--sysroot=$(xcrun --sdk iphoneos --show-sdk-path)"
+          export IPHONEOS_DEPLOYMENT_TARGET=17.0
+          cargo build --release --target aarch64-apple-ios --features obfuscate 2>&1 | tee "$CM_BUILD_DIR/idevice-build.log"
+
+      - name: Stage idevice header and library
+        script: |
+          set -euo pipefail
+          mkdir -p ThirdParty/idevice
+          cp idevice/ffi/idevice.h ThirdParty/idevice/idevice.h
+          cp idevice/target/aarch64-apple-ios/release/libidevice_ffi.a ThirdParty/idevice/libidevice_ffi.a
+          ls -la ThirdParty/idevice
+
+      - name: Install XcodeGen
+        script: |
+          set -euo pipefail
+          brew install xcodegen
+
+      - name: Generate Xcode project
+        script: |
+          set -euo pipefail
+          xcodegen generate
+
+      - name: Build app (unsigned)
+        script: |
+          set -euo pipefail
+          xcodebuild archive \
+            -project VirtualLoc.xcodeproj \
+            -scheme VirtualLoc \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath build/VirtualLoc.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" 2>&1 | tee "$CM_BUILD_DIR/xcodebuild.log"
+
+      - name: Package IPA
+        script: |
+          set -euo pipefail
+          mkdir -p build/Payload
+          cp -R build/VirtualLoc.xcarchive/Products/Applications/VirtualLoc.app build/Payload/
+          cd build
+          zip -qr VirtualLoc.ipa Payload
+
+    artifacts:
+      - build/VirtualLoc.ipa
+      - idevice-build.log
+      - xcodebuild.log
