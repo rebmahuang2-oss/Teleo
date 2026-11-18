@@ -17,14 +17,20 @@ workflows:
           git fetch --depth 1 origin "$IDEVICE_REF"
           git checkout "$IDEVICE_REF"
 
-      - name: Install Rust target (aarch64-apple-ios)
+      - name: Install Rust
         script: |
           set -euo pipefail
+          # Codemagic 的 mac_mini_m2 機器沒有預裝 rustup（GitHub Actions 的 macOS
+          # runner 有，這就是上一版卡在「rustup: command not found」的原因）。
+          # 自己裝一份，-y 跳過互動式問答。
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          source "$HOME/.cargo/env"
           rustup target add aarch64-apple-ios
 
       - name: Build idevice (iOS device static library)
         script: |
           set -euo pipefail
+          source "$HOME/.cargo/env"
           cd idevice/ffi
           export BINDGEN_EXTRA_CLANG_ARGS="--sysroot=$(xcrun --sdk iphoneos --show-sdk-path)"
           export IPHONEOS_DEPLOYMENT_TARGET=17.0
