@@ -77,8 +77,16 @@ final class PiPOverlay: NSObject, ObservableObject, AVPictureInPictureController
     private let playbackDelegate = PiPPlaybackDelegate()
     private var sourceView: UIView?
     private var silentPlayer: AVAudioPlayer?
+    private var pixelBufferPool: CVPixelBufferPool?
+    /// 定期重新送一張畫面進子母畫面，不管內容有沒有變。反組譯同類型的真實 App
+    /// （用一模一樣的 AVSampleBufferDisplayLayer + 播放樣式子母畫面做法）發現它們
+    /// 也有一個固定頻率的 refresh timer；我們原本只有在 `update()` 被呼叫時才
+    /// 送畫面，太久沒送新的一幀，系統大概率會判斷「播放卡住了」，於是系統自己的
+    /// 控制列卡在展開狀態收不回去——這才是浮動視窗「整個癱瘓」的真正原因。
+    private var refreshTimer: Timer?
 
     private let renderSize = CGSize(width: 340, height: 84)
+    private let refreshInterval: TimeInterval = 1.0
 
     private override init() {
         super.init()
@@ -137,11 +145,29 @@ final class PiPOverlay: NSObject, ObservableObject, AVPictureInPictureController
         guard let pip, !pip.isPictureInPictureActive else { return }
         startSilentAudio()
         pip.startPictureInPicture()
+        startRefreshTimer()
     }
 
     func stop() {
         pip?.stopPictureInPicture()
         stopSilentAudio()
+        stopRefreshTimer()
+    }
+
+    /// 固定頻率重畫、重送一幀，讓系統一直覺得「畫面持續在播」，不會卡在
+    /// 控制列展開的狀態。即使內容完全沒變，也要送，這點是刻意的。
+    private func startRefreshTimer() {
+        stopRefreshTimer()
+        let timer = Timer(timeInterval: refreshInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.renderFrame() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        refreshTimer = timer
+    }
+
+    private func stopRefreshTimer() {
+        refreshTimer?.invalidate()
+        refreshTimer = nil
     }
 
     /// 更新浮動列顯示的文字內容。
@@ -166,55 +192,81 @@ final class PiPOverlay: NSObject, ObservableObject, AVPictureInPictureController
 
     // MARK: 把目前狀態畫成一張圖，當作子母畫面的「影片畫面」餵進去
 
-    /// 用 `ImageRenderer` 把 `PiPOverlayWidgetView` 拍成一張圖，包成一格
-    /// sample buffer 塞進 `AVSampleBufferDisplayLayer`。沒有真的影片在播，
-    /// 所以每次狀態變化（時速、進度、暫停狀態）就重新拍一張、重新塞一次。
+    /// 直接用 Core Graphics／UIKit 的 `draw(in:)` 把目前狀態畫進 pixel buffer，
+    /// 不再經過 SwiftUI 的 `ImageRenderer`。反組譯參考的真實 App（跟我們用
+    /// 同一套子母畫面技術）就是這樣做的：字型、顏色、段落樣式都只建立一次、
+    /// 靜態快取起來（見 `PiPFrameStyle`），不是每一幀都重新跑一次 SwiftUI 的
+    /// 版面計算，這樣持續每秒畫一次才不容易卡頓、比較省電。
     private func renderFrame() {
-        let renderer = ImageRenderer(content: PiPOverlayWidgetView(overlay: self).frame(
-            width: renderSize.width, height: renderSize.height))
-        renderer.scale = UIScreen.main.scale
-        guard let cgImage = renderer.uiImage?.cgImage else { return }
-        guard let pixelBuffer = PiPOverlay.makePixelBuffer(from: cgImage, size: renderSize) else { return }
-        guard let sampleBuffer = PiPOverlay.makeSampleBuffer(from: pixelBuffer) else { return }
+        guard let pixelBuffer = acquirePixelBuffer() else { return }
+        draw(into: pixelBuffer)
+        guard let sampleBuffer = PiPOverlay.makeSampleBuffer(from: pixelBuffer, duration: refreshInterval) else { return }
         if displayLayer.status == .failed { displayLayer.flush() }
         displayLayer.enqueue(sampleBuffer)
     }
 
-    private static func makePixelBuffer(from image: CGImage, size: CGSize) -> CVPixelBuffer? {
-        let width = Int(size.width * UIScreen.main.scale)
-        let height = Int(size.height * UIScreen.main.scale)
-        let attrs: [CFString: Any] = [
+    /// 用一個固定大小的 pool 重複借用 pixel buffer，不要每一幀都重新配置記憶體——
+    /// 反組譯參考的 App 也是這樣做，持續每秒送幀時比較不會造成記憶體壓力/掉幀。
+    private func pixelBufferPool(width: Int, height: Int) -> CVPixelBufferPool? {
+        if let pixelBufferPool { return pixelBufferPool }
+        let pixelAttrs: [CFString: Any] = [
             kCVPixelBufferCGImageCompatibilityKey: true,
             kCVPixelBufferCGBitmapContextCompatibilityKey: true,
+            kCVPixelBufferWidthKey: width,
+            kCVPixelBufferHeightKey: height,
+            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
         ]
-        var pixelBuffer: CVPixelBuffer?
-        let status = CVPixelBufferCreate(kCFAllocatorDefault, width, height,
-                                          kCVPixelFormatType_32BGRA, attrs as CFDictionary, &pixelBuffer)
-        guard status == kCVReturnSuccess, let buffer = pixelBuffer else { return nil }
+        var pool: CVPixelBufferPool?
+        CVPixelBufferPoolCreate(kCFAllocatorDefault, nil, pixelAttrs as CFDictionary, &pool)
+        pixelBufferPool = pool
+        return pool
+    }
 
-        CVPixelBufferLockBaseAddress(buffer, [])
-        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        guard let context = CGContext(
-            data: CVPixelBufferGetBaseAddress(buffer),
-            width: width, height: height,
-            bitsPerComponent: 8,
-            bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
-            space: colorSpace,
-            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
-        ) else { return nil }
-        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+    private func acquirePixelBuffer() -> CVPixelBuffer? {
+        let scale = UIScreen.main.scale
+        let width = Int(renderSize.width * scale)
+        let height = Int(renderSize.height * scale)
+        guard let pool = pixelBufferPool(width: width, height: height) else { return nil }
+        var pixelBuffer: CVPixelBuffer?
+        let status = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &pixelBuffer)
+        guard status == kCVReturnSuccess, let buffer = pixelBuffer else { return nil }
         return buffer
     }
 
-    private static func makeSampleBuffer(from pixelBuffer: CVPixelBuffer) -> CMSampleBuffer? {
+    /// 把目前的畫面內容直接畫進 pixel buffer 的 CGContext，座標用「點」為單位
+    /// （跟 renderSize 一樣），先把 context 依螢幕倍率放大，畫起來才不用自己
+    /// 到處乘 scale。
+    private func draw(into pixelBuffer: CVPixelBuffer) {
+        let scale = UIScreen.main.scale
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        CVPixelBufferLockBaseAddress(pixelBuffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
+        guard let context = CGContext(
+            data: CVPixelBufferGetBaseAddress(pixelBuffer),
+            width: width, height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: CVPixelBufferGetBytesPerRow(pixelBuffer),
+            space: PiPFrameStyle.colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        ) else { return }
+
+        context.scaleBy(x: scale, y: scale)
+        UIGraphicsPushContext(context)
+        PiPFrameStyle.draw(overlay: self, in: CGRect(origin: .zero, size: renderSize))
+        UIGraphicsPopContext()
+    }
+
+    /// duration 給實際的畫面間隔（不是 `.invalid`），讓系統知道這是持續在播放的
+    /// 內容、下一幀大概什麼時候會來，而不是一張「播完就沒了」的單張畫面。
+    private static func makeSampleBuffer(from pixelBuffer: CVPixelBuffer, duration: TimeInterval) -> CMSampleBuffer? {
         var formatDescription: CMFormatDescription?
         CMVideoFormatDescriptionCreateForImageBuffer(
             allocator: kCFAllocatorDefault, imageBuffer: pixelBuffer, formatDescriptionOut: &formatDescription)
         guard let formatDescription else { return nil }
 
         var timing = CMSampleTimingInfo(
-            duration: .invalid,
+            duration: CMTime(seconds: duration, preferredTimescale: 600),
             presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
             decodeTimeStamp: .invalid)
         var sampleBuffer: CMSampleBuffer?
@@ -288,13 +340,31 @@ final class PiPOverlay: NSObject, ObservableObject, AVPictureInPictureController
 
     func pictureInPictureControllerDidStopPictureInPicture(_ controller: AVPictureInPictureController) {
         isActive = false
+        stopRefreshTimer()
     }
 
     func pictureInPictureController(_ controller: AVPictureInPictureController,
                                      failedToStartPictureInPictureWithError error: Error) {
         isActive = false
+        stopRefreshTimer()
         AppLog.shared.add("浮動視窗開啟失敗：\(error.localizedDescription)")
     }
+
+    /// 反組譯比對真實 App 後補上的方法，之前完全漏掉了。使用者點一下子母畫面
+    /// 要「恢復回 App」時，系統會呼叫這個方法，**要等我們呼叫 completionHandler
+    /// 之後，系統才會真的把控制列收掉、完成轉場**。沒實作這個方法，系統在某些
+    /// 情況下可能會一直等這個回呼等不到，導致控制列卡住收不回去——這很可能就是
+    /// 浮動視窗「整個癱瘓」的真正原因，不是上一版猜的「太久沒送新畫面」而已
+    /// （那個也該修，但這個才是關鍵）。我們沒有自訂的「恢復畫面」轉場動畫，
+    /// 直接回報完成就好。
+    func pictureInPictureController(_ controller: AVPictureInPictureController,
+                                     restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void) {
+        completionHandler(true)
+    }
+
+    func pictureInPictureControllerWillStartPictureInPicture(_ controller: AVPictureInPictureController) {}
+
+    func pictureInPictureControllerWillStopPictureInPicture(_ controller: AVPictureInPictureController) {}
 }
 
 /// 系統「播放樣式」子母畫面的控制代理：暫停/繼續、快轉、倒轉這幾顆按鈕
@@ -355,5 +425,110 @@ final class PiPPlaybackDelegate: NSObject, AVPictureInPictureSampleBufferPlaybac
         _ pictureInPictureController: AVPictureInPictureController
     ) -> Bool {
         false
+    }
+}
+
+/// 浮動視窗畫面的樣式與畫法。顏色、字型、段落樣式都是靜態、只建立一次就快取
+/// 起來，跟反組譯參考的真實 App 一樣——避免每秒重畫一次時反覆建立這些物件。
+/// 版面（圖示圓圈＋狀態小圓點、標題/字幕、進度條、右側時速）照搬原本
+/// `PiPOverlayWidgetView` 的 SwiftUI 版型，只是改用 Core Graphics／UIKit 的
+/// `draw(in:)` 畫出來，不再是 SwiftUI 的 View。
+@MainActor
+private enum PiPFrameStyle {
+    static let colorSpace = CGColorSpaceCreateDeviceRGB()
+
+    static let titleFont = UIFont.systemFont(ofSize: 13, weight: .semibold)
+    static let subtitleFont = UIFont.systemFont(ofSize: 11, weight: .regular)
+    static let speedFont = UIFont.monospacedDigitSystemFont(ofSize: 19, weight: .bold)
+
+    static let paragraph: NSParagraphStyle = {
+        let p = NSMutableParagraphStyle()
+        p.lineBreakMode = .byTruncatingTail
+        return p
+    }()
+
+    static let backgroundColors: CFArray = [
+        UIColor(red: 0.07, green: 0.09, blue: 0.09, alpha: 1).cgColor,
+        UIColor.black.cgColor,
+    ] as CFArray
+    static let backgroundGradient = CGGradient(colorsSpace: colorSpace, colors: backgroundColors, locations: [0, 1])
+    static let topHairline = UIColor.white.withAlphaComponent(0.08).cgColor
+    static let subtitleColor = UIColor.white.withAlphaComponent(0.65)
+    static let progressTrackColor = UIColor.white.withAlphaComponent(0.15)
+    static let pausedAccent = UIColor(red: 0.95, green: 0.55, blue: 0.15, alpha: 1)
+    static let runningAccent = UIColor(red: 0.20, green: 0.85, blue: 0.80, alpha: 1)
+
+    static func attributes(font: UIFont, color: UIColor) -> [NSAttributedString.Key: Any] {
+        [.font: font, .foregroundColor: color, .paragraphStyle: paragraph]
+    }
+
+    static func draw(overlay: PiPOverlay, in rect: CGRect) {
+        guard let context = UIGraphicsGetCurrentContext() else { return }
+        let accent = overlay.isPaused ? pausedAccent : runningAccent
+
+        // 背景漸層 + 上緣細線
+        context.saveGState()
+        context.addRect(rect)
+        context.clip()
+        if let backgroundGradient {
+            context.drawLinearGradient(backgroundGradient,
+                                        start: CGPoint(x: rect.minX, y: rect.minY),
+                                        end: CGPoint(x: rect.maxX, y: rect.maxY),
+                                        options: [])
+        }
+        context.restoreGState()
+        context.setFillColor(topHairline)
+        context.fill(CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: 1))
+
+        let content = rect.insetBy(dx: 14, dy: 12)
+
+        // 左：狀態圖示圓圈 + 右下角狀態小圓點
+        let iconDiameter: CGFloat = 46
+        let iconRect = CGRect(x: content.minX, y: content.midY - iconDiameter / 2,
+                               width: iconDiameter, height: iconDiameter)
+        context.setFillColor(accent.withAlphaComponent(0.18).cgColor)
+        context.fillEllipse(in: iconRect)
+        let symbolName = overlay.isPaused ? "pause.fill" : "location.fill"
+        if let symbol = UIImage(systemName: symbolName,
+                                 withConfiguration: UIImage.SymbolConfiguration(pointSize: 18, weight: .bold))?
+            .withTintColor(accent, renderingMode: .alwaysOriginal) {
+            let size = symbol.size
+            symbol.draw(in: CGRect(x: iconRect.midX - size.width / 2, y: iconRect.midY - size.height / 2,
+                                    width: size.width, height: size.height))
+        }
+        let dotDiameter: CGFloat = 11
+        let dotRect = CGRect(x: iconRect.maxX - dotDiameter, y: iconRect.maxY - dotDiameter,
+                              width: dotDiameter, height: dotDiameter)
+        context.setFillColor(accent.cgColor)
+        context.fillEllipse(in: dotRect)
+        context.setStrokeColor(UIColor.black.cgColor)
+        context.setLineWidth(2)
+        context.strokeEllipse(in: dotRect.insetBy(dx: 1, dy: 1))
+
+        // 中：標題／字幕／進度條
+        let rightColumnWidth: CGFloat = 92
+        let middleX = iconRect.maxX + 12
+        let middleWidth = max(0, content.maxX - rightColumnWidth - middleX)
+        NSAttributedString(string: overlay.title, attributes: attributes(font: titleFont, color: .white))
+            .draw(with: CGRect(x: middleX, y: content.minY, width: middleWidth, height: 18),
+                  options: [.usesLineFragmentOrigin], context: nil)
+        NSAttributedString(string: overlay.subtitle, attributes: attributes(font: subtitleFont, color: subtitleColor))
+            .draw(with: CGRect(x: middleX, y: content.minY + 20, width: middleWidth, height: 16),
+                  options: [.usesLineFragmentOrigin], context: nil)
+
+        if let progress = overlay.progress, middleWidth > 0 {
+            let barRect = CGRect(x: middleX, y: content.minY + 42, width: middleWidth, height: 4)
+            progressTrackColor.setFill()
+            UIBezierPath(roundedRect: barRect, cornerRadius: 2).fill()
+            let fillWidth = max(4, barRect.width * CGFloat(max(0, min(1, progress))))
+            accent.setFill()
+            UIBezierPath(roundedRect: CGRect(x: barRect.minX, y: barRect.minY, width: fillWidth, height: barRect.height),
+                         cornerRadius: 2).fill()
+        }
+
+        // 右：大字時速
+        NSAttributedString(string: overlay.speedText, attributes: attributes(font: speedFont, color: accent))
+            .draw(with: CGRect(x: content.maxX - rightColumnWidth, y: content.minY, width: rightColumnWidth, height: 26),
+                  options: [.usesLineFragmentOrigin], context: nil)
     }
 }

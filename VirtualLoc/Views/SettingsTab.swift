@@ -90,6 +90,12 @@ struct SettingsTab: View {
 
                 Section("浮動視窗") {
                     Toggle("切到其他 App 時顯示浮動進度列", isOn: $pipEnabled)
+                        .onChange(of: pipEnabled) { _, newValue in
+                            // 關掉開關時，如果浮動視窗「現在正浮著」要立刻收掉，不要等到
+                            // 下一次路線跑動時才會順便清掉——不然關了開關，視窗卻還留在
+                            // 畫面上，看起來就像「設定沒有生效」。
+                            if !newValue { PiPOverlay.shared.stop() }
+                        }
                     Text("路線或搖桿進行中，切到遊戲等其他 App 時，畫面上方會浮一條小視窗顯示目前速度、走到第幾點、還剩多久，也能直接暫停／繼續。這是借用「子母畫面」機制做出來的效果，不保證在所有情況下都能穩定顯示；關閉後可以省一點電。")
                         .font(.caption).foregroundColor(.secondary)
                 }
