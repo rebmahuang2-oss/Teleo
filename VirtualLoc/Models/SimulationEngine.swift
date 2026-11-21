@@ -579,24 +579,18 @@ final class SimulationEngine: ObservableObject {
         guard connection == .connected else { return }
         let now = Date()
 
-        // 時速準不準，關鍵不是「算距離的公式」，而是「送到裝置的那一刻，距離有沒有算到那一刻」。
+        // 之前這裡用 `!sending` 擋住每個 tick 的距離推進，等上一次送出真的完成才
+        // 繼續算距離——出發點是想避免「送不出去的中間點被丟掉時，順便漏算一段距離」。
+        // 但這個擋法有副作用：只要網路有一點延遲、`sending` 卡住個一兩個 tick，
+        // 位置就會原地不動，等 send 完成那一刻才用「這段時間累積的距離」一次補上，
+        // 視覺上看起來就是你說的「忽快忽慢」——網路越不穩，走起來越頓挫。
         //
-        // 原本每個 tick（固定 0.5 秒）都會算一次距離、呼叫一次 send()；但送一次定位要等裝置回應，
-        // 碰到網路延遲、送不完的時候，send() 會把來不及送的中間點直接丟掉、只留最新的一個（見
-        // send() 的 pending 機制）。問題是：lastAdvanceTime 當時仍然每 0.5 秒照樣往前推進，
-        // 所以「被丟掉那個點」裡算進去的距離，跟「真正送出去那一刻」之間，其實還多經過了一段
-        // 排隊等待的時間沒被算進去——等於偷偷漏算了一段距離。遊戲端拿「收到的距離」除以「收到
-        // 的時間間隔」反推時速，算出來就會比設定的慢，而且網路忽快忽慢時還會忽快忽慢。
-        //
-        // 修法：只有在「上一次送出已經完成」（!sending）時才去算距離、呼叫 send()；
-        // 還在等裝置回應的那幾個 tick 就先跳過，不去動 lastAdvanceTime。這樣不管中間
-        // 卡了幾個 tick 沒送，下一次真正要送的時候，用的 dt 永遠等於「上一次真正送出」
-        // 到「這一次真正送出」之間，裝置實際收到兩個點的真實時間差，距離／時間的比例
-        // 才會跟設定的時速完全對得起來，不會被網路延遲偷走一段。
-        //
-        // 跳躍收果（hopTick）不是連續移動、沒有「時速」這回事，只是單純倒數停留秒數，
-        // 所以它的倒數改用真實經過時間計算（不再用固定 tick 常數），但不受 !sending 影響——
-        // 停留時間準不準跟「有沒有送成功上一個點」是兩件事，不應該卡在一起。
+        // 其實不需要靠「擋住距離推進」來解決漏算問題：`send()` 本身已經有 `pending`
+        // 機制（見下方 send()），忙碌時新位置會先暫存，等上一次送出完成自動補送最新
+        // 的一個，不會漏掉「最後的目的地」。所以距離／位置的推進可以、也應該每個
+        // tick 都照真實經過時間（dt）正常前進，不受 `sending` 影響；真正要不要送
+        // 出網路封包，交給 send() 自己去判斷、排隊，兩件事不用綁在一起處理，位置
+        // 才會走得穩，網路忽快忽慢頂多影響「多久送一次封包」，不會影響「走多快」。
         switch mode {
         case .route:
             if routeRunning && !routePaused {
@@ -604,7 +598,7 @@ final class SimulationEngine: ObservableObject {
                     let dt = now.timeIntervalSince(lastAdvanceTime)
                     lastAdvanceTime = now
                     hopTick(dt: dt)
-                } else if !sending {
+                } else {
                     let dt = min(now.timeIntervalSince(lastAdvanceTime), tick * 8)
                     lastAdvanceTime = now
                     advanceRoute(meters: routeKmh / 3.6 * dt)
@@ -612,7 +606,7 @@ final class SimulationEngine: ObservableObject {
                 updatePiPOverlay()
             }
         case .joystick:
-            if joystick != .zero, !sending {
+            if joystick != .zero {
                 let dt = min(now.timeIntervalSince(lastAdvanceTime), tick * 8)
                 lastAdvanceTime = now
                 moveByJoystick(meters: joystickKmh / 3.6 * dt)

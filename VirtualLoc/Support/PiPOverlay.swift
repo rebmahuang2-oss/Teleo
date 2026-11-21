@@ -396,10 +396,18 @@ final class PiPPlaybackDelegate: NSObject, AVPictureInPictureSampleBufferPlaybac
         }
     }
 
+    /// 反組譯真實 App 挖出來的關鍵差異：它們回的不是「無限長」，而是
+    /// `CMTime(seconds: 3600, preferredTimescale: 600)`——假裝自己是一段
+    /// 1 小時長的影片，不是真的直播。我們原本回傳 `.positiveInfinity`，
+    /// 系統會把這個子母畫面當成「直播」處理，介面上才會一直出現「直播」
+    /// 字樣跟那條特別長的進度／控制列，而且很可能就是因為這樣，控制列
+    /// 展開之後比較容易卡住收不回去（直播樣式的 PiP 本來就比較像一個
+    /// 持續開著的面板，不是「播一下、收起來」的一般影片）。改成有限長度，
+    /// 系統會把它當一般影片處理，skip 按鈕一樣正常可以用。
     func pictureInPictureControllerTimeRangeForPlayback(
         _ pictureInPictureController: AVPictureInPictureController
     ) -> CMTimeRange {
-        CMTimeRange(start: .negativeInfinity, duration: .positiveInfinity)
+        CMTimeRange(start: .zero, duration: CMTime(seconds: 3600, preferredTimescale: 600))
     }
 
     func pictureInPictureControllerIsPlaybackPaused(
