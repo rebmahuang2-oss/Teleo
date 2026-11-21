@@ -62,7 +62,14 @@ final class PiPOverlay: NSObject, ObservableObject, AVPictureInPictureController
     @Published var subtitle = ""
     @Published var speedText = ""
     @Published var isPaused = false {
-        didSet { playbackDelegate.isPaused = isPaused }
+        didSet {
+            playbackDelegate.isPaused = isPaused
+            // 暫停時把 timebase 的速率釘成 0，子母畫面的進度列才會跟著凍結在
+            // 目前位置，而不是視覺上停了、但系統內部的「目前時間」還在往前跑。
+            if let controlTimebase {
+                CMTimebaseSetRate(controlTimebase, rate: isPaused ? 0 : 1)
+            }
+        }
     }
     /// 路線完成度 0...1；搖桿模式或沒有固定路線時是 nil，不顯示進度條。
     @Published var progress: Double?
@@ -84,6 +91,15 @@ final class PiPOverlay: NSObject, ObservableObject, AVPictureInPictureController
     /// 送畫面，太久沒送新的一幀，系統大概率會判斷「播放卡住了」，於是系統自己的
     /// 控制列卡在展開狀態收不回去——這才是浮動視窗「整個癱瘓」的真正原因。
     private var refreshTimer: Timer?
+    /// 每一幀的時間戳不能直接拿「開機到現在」的絕對時間——那會是幾萬秒起跳，
+    /// 跟我們跟系統宣告的「這是一段 0～3600 秒的影片」(`pictureInPictureControllerTimeRangeForPlayback`)
+    /// 完全對不上。子母畫面的快轉／倒轉鍵能不能按、按下去要跳到哪，是系統拿
+    /// 「目前播放時間」對著這段宣告的時間範圍去算的；時間戳基準不對，倒轉鍵
+    /// 判斷永遠在邊界（所以按不下去），快轉鍵狀態也會算錯（按了系統內部覺得
+    /// 沒有變化，所以看起來「沒反應」）。這裡自己建一個獨立的 CMTimebase，
+    /// 從 0 秒開始算，每一幀都拿這個 timebase「現在」的時間當時間戳，確保跟
+    /// 宣告的時間範圍是同一套座標。
+    private var controlTimebase: CMTimebase?
 
     private let renderSize = CGSize(width: 340, height: 84)
     private let refreshInterval: TimeInterval = 1.0
@@ -111,6 +127,8 @@ final class PiPOverlay: NSObject, ObservableObject, AVPictureInPictureController
         view.alpha = 0.01
         displayLayer.frame = view.bounds
         displayLayer.videoGravity = .resizeAspect
+        displayLayer.controlTimebase = PiPOverlay.makeControlTimebase()
+        self.controlTimebase = displayLayer.controlTimebase
         view.layer.addSublayer(displayLayer)
         self.sourceView = view
         attachSourceViewIfNeeded(view)
@@ -198,11 +216,41 @@ final class PiPOverlay: NSObject, ObservableObject, AVPictureInPictureController
     /// 靜態快取起來（見 `PiPFrameStyle`），不是每一幀都重新跑一次 SwiftUI 的
     /// 版面計算，這樣持續每秒畫一次才不容易卡頓、比較省電。
     private func renderFrame() {
+        rebaseControlTimebaseIfNeeded()
         guard let pixelBuffer = acquirePixelBuffer() else { return }
         draw(into: pixelBuffer)
-        guard let sampleBuffer = PiPOverlay.makeSampleBuffer(from: pixelBuffer, duration: refreshInterval) else { return }
+        guard let sampleBuffer = makeSampleBuffer(from: pixelBuffer, duration: refreshInterval) else { return }
         if displayLayer.status == .failed { displayLayer.flush() }
         displayLayer.enqueue(sampleBuffer)
+    }
+
+    /// 浮動視窗可能一開就是幾十分鐘（路線很長、或搖桿長時間搖著），但我們跟
+    /// 系統宣告的是「這是一段 1 小時（3600 秒）長的影片」。快接近那個 1 小時
+    /// 上限時，把 timebase 的時間撥回去一點、留出空間，不然繼續往前只會
+    /// 超出宣告的範圍，快轉鍵之後又會開始判斷錯亂（跟最初那個 bug一樣）。
+    /// 使用者不會感覺到這個動作（進度列極少數情況下可能輕微跳一下），換來的是
+    /// 長時間使用時快轉／倒轉鍵持續正常可按。
+    private func rebaseControlTimebaseIfNeeded() {
+        guard let controlTimebase else { return }
+        let elapsed = CMTimeGetSeconds(CMTimebaseGetTime(controlTimebase))
+        guard elapsed >= 3000 else { return }
+        CMTimebaseSetTime(controlTimebase, time: CMTime(seconds: 60, preferredTimescale: 600))
+    }
+
+    /// 建一個獨立、從 0 秒開始算的 CMTimebase，給 displayLayer 當作
+    /// `controlTimebase`，往後每一幀的時間戳都從這裡拿「現在幾秒」，
+    /// 跟宣告的 `pictureInPictureControllerTimeRangeForPlayback`（0～3600 秒）
+    /// 用同一套座標。理由見 `controlTimebase` 屬性上的註解。
+    private static func makeControlTimebase() -> CMTimebase? {
+        var timebase: CMTimebase?
+        CMTimebaseCreateWithSourceClock(
+            allocator: kCFAllocatorDefault,
+            sourceClock: CMClockGetHostTimeClock(),
+            timebaseOut: &timebase)
+        guard let timebase else { return nil }
+        CMTimebaseSetTime(timebase, time: .zero)
+        CMTimebaseSetRate(timebase, rate: 1.0)
+        return timebase
     }
 
     /// 用一個固定大小的 pool 重複借用 pixel buffer，不要每一幀都重新配置記憶體——
@@ -236,6 +284,19 @@ final class PiPOverlay: NSObject, ObservableObject, AVPictureInPictureController
     /// 把目前的畫面內容直接畫進 pixel buffer 的 CGContext，座標用「點」為單位
     /// （跟 renderSize 一樣），先把 context 依螢幕倍率放大，畫起來才不用自己
     /// 到處乘 scale。
+    ///
+    /// 這裡漏掉的一步、也是之前浮動視窗「整塊黑底看不到字」的真正原因：
+    /// `CGBitmapContext` 原生座標系是「左下角為原點、y 往上」，但
+    /// `NSAttributedString.draw`／`UIBezierPath`／`UIImage.draw` 這些 UIKit
+    /// 畫法都假設「左上角為原點、y 往下」，兩邊對不起來。之前只有
+    /// `scaleBy(scale, scale)`，完全沒處理這個上下顛倒的問題，所以背景那片
+    /// 滿版漸層看起來沒事（本來就對稱、翻不翻都一樣），但圖示、文字、進度條
+    /// 這些照「左上角原點」算出來的位置跟形狀，實際畫出來的時候整個上下顛倒、
+    /// 位置也對不上，疊在一起幾乎等於什麼都看不到。反組譯真實 App 的
+    /// `render()`，看到它在 `UIGraphicsPushContext` 之前多做了
+    /// `CGContextTranslateCTM` 再 `CGContextScaleCTM`——這正是標準的「把
+    /// CGBitmapContext 轉成 UIKit 座標系」寫法：先把原點平移到左上角高度，
+    /// 再把 y 方向乘上負值翻過來（順便套用螢幕倍率）。補上這兩行就是這次的修法。
     private func draw(into pixelBuffer: CVPixelBuffer) {
         let scale = UIScreen.main.scale
         let width = CVPixelBufferGetWidth(pixelBuffer)
@@ -251,7 +312,11 @@ final class PiPOverlay: NSObject, ObservableObject, AVPictureInPictureController
             bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
         ) else { return }
 
-        context.scaleBy(x: scale, y: scale)
+        context.clear(CGRect(x: 0, y: 0, width: width, height: height))
+        // 翻轉成「左上角原點、y 往下」的 UIKit 座標系，同時套用螢幕倍率，
+        // 畫的時候才能直接用 renderSize 這種「點」為單位的座標，不用自己換算。
+        context.translateBy(x: 0, y: renderSize.height)
+        context.scaleBy(x: scale, y: -scale)
         UIGraphicsPushContext(context)
         PiPFrameStyle.draw(overlay: self, in: CGRect(origin: .zero, size: renderSize))
         UIGraphicsPopContext()
@@ -259,15 +324,21 @@ final class PiPOverlay: NSObject, ObservableObject, AVPictureInPictureController
 
     /// duration 給實際的畫面間隔（不是 `.invalid`），讓系統知道這是持續在播放的
     /// 內容、下一幀大概什麼時候會來，而不是一張「播完就沒了」的單張畫面。
-    private static func makeSampleBuffer(from pixelBuffer: CVPixelBuffer, duration: TimeInterval) -> CMSampleBuffer? {
+    ///
+    /// presentationTimeStamp 改拿 `controlTimebase`「現在」的時間（從 0 秒起算），
+    /// 不能用 `CMClockGetTime(CMClockGetHostTimeClock())`——那是裝置開機到現在的
+    /// 絕對時間，通常是幾萬秒起跳，跟我們宣告的「0～3600 秒影片」完全對不上，
+    /// 這正是快轉／倒轉按鈕判斷錯亂（倒轉永遠灰掉、快轉按了沒反應）的根本原因。
+    private func makeSampleBuffer(from pixelBuffer: CVPixelBuffer, duration: TimeInterval) -> CMSampleBuffer? {
         var formatDescription: CMFormatDescription?
         CMVideoFormatDescriptionCreateForImageBuffer(
             allocator: kCFAllocatorDefault, imageBuffer: pixelBuffer, formatDescriptionOut: &formatDescription)
         guard let formatDescription else { return nil }
 
+        let pts = controlTimebase.map { CMTimebaseGetTime($0) } ?? CMClockGetTime(CMClockGetHostTimeClock())
         var timing = CMSampleTimingInfo(
             duration: CMTime(seconds: duration, preferredTimescale: 600),
-            presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
+            presentationTimeStamp: pts,
             decodeTimeStamp: .invalid)
         var sampleBuffer: CMSampleBuffer?
         let status = CMSampleBufferCreateForImageBuffer(
