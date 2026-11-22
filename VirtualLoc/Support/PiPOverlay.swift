@@ -217,10 +217,16 @@ final class PiPOverlay: NSObject, ObservableObject, AVPictureInPictureController
     /// 版面計算，這樣持續每秒畫一次才不容易卡頓、比較省電。
     private func renderFrame() {
         rebaseControlTimebaseIfNeeded()
+        // 反組譯 FreeWay 的 render() 發現：他們送每一幀之前，一定先做這兩個檢查，
+        // 跟我們原本「每秒硬塞一幀，完全不管 displayLayer 準備好了沒」完全不一樣。
+        // `AVSampleBufferDisplayLayer` 在它還沒準備好收下一筆資料時被硬塞，很容易
+        // 整個卡住、永遠顯示不出任何畫面（只剩一片黑）——這才是浮動視窗從頭到尾
+        // 都「整塊黑、連背景色都沒有」的真正原因，不只是座標翻轉的問題。
+        if displayLayer.status == .failed { displayLayer.flush() }
+        guard displayLayer.isReadyForMoreMediaData else { return }
         guard let pixelBuffer = acquirePixelBuffer() else { return }
         draw(into: pixelBuffer)
         guard let sampleBuffer = makeSampleBuffer(from: pixelBuffer, duration: refreshInterval) else { return }
-        if displayLayer.status == .failed { displayLayer.flush() }
         displayLayer.enqueue(sampleBuffer)
     }
 
