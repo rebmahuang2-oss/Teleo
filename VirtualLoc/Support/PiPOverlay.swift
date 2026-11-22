@@ -102,7 +102,18 @@ final class PiPOverlay: NSObject, ObservableObject, AVPictureInPictureController
     private var controlTimebase: CMTimebase?
 
     private let renderSize = CGSize(width: 340, height: 84)
-    private let refreshInterval: TimeInterval = 1.0
+    /// 反組譯 FreeWay 的 `refreshTimer()` 發現送幀頻率不是固定的，是看 App
+    /// 在不在背景動態切換：**切到背景時（也就是浮動視窗真的浮在別的 App 上
+    /// 給人看的時候）用 1/60 秒一幀**（幾乎是每個畫面更新都送一次），**在前景
+    /// 時才放慢成 0.25 秒一次**。我們原本不管前後台都固定每 1 秒送一幀，比它
+    /// 背景時的頻率慢了快 60 倍——`isReadyForMoreMediaData` 這類系統內部的
+    /// 「準備好了沒」訊號，很可能需要夠高的餵幀頻率才會正常循環、不卡住；
+    /// 餵太慢，一旦卡在「沒準備好」就可能再也等不到下一次真正準備好的瞬間，
+    /// 這正是加了那個檢查之後「只有開始那一瞬間看得到，之後全黑」的原因。
+    private static let backgroundRefreshInterval: TimeInterval = 1.0 / 60.0
+    private static let foregroundRefreshInterval: TimeInterval = 0.25
+    /// 目前這一幀實際用的間隔，給 `makeSampleBuffer` 當作這一幀的 duration。
+    private var currentRefreshInterval: TimeInterval = PiPOverlay.foregroundRefreshInterval
 
     private override init() {
         super.init()
@@ -172,12 +183,29 @@ final class PiPOverlay: NSObject, ObservableObject, AVPictureInPictureController
         stopRefreshTimer()
     }
 
-    /// 固定頻率重畫、重送一幀，讓系統一直覺得「畫面持續在播」，不會卡在
-    /// 控制列展開的狀態。即使內容完全沒變，也要送，這點是刻意的。
+    /// 重畫、重送一幀，讓系統一直覺得「畫面持續在播」，不會卡在控制列展開的
+    /// 狀態。即使內容完全沒變，也要送，這點是刻意的。
+    ///
+    /// 不用固定頻率的 repeating Timer，改成「送一幀→排下一次→送一幀→...」
+    /// 這種自己重新排程的寫法，每次排程時都重新看一下 App 在不在背景，決定
+    /// 下一幀要多快送（見 `backgroundRefreshInterval`／`foregroundRefreshInterval`
+    /// 上面的註解）。
     private func startRefreshTimer() {
         stopRefreshTimer()
-        let timer = Timer(timeInterval: refreshInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.renderFrame() }
+        scheduleNextRefresh()
+    }
+
+    private func scheduleNextRefresh() {
+        let interval = UIApplication.shared.applicationState == .background
+            ? PiPOverlay.backgroundRefreshInterval
+            : PiPOverlay.foregroundRefreshInterval
+        currentRefreshInterval = interval
+        let timer = Timer(timeInterval: interval, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.renderFrame()
+                self.scheduleNextRefresh()
+            }
         }
         RunLoop.main.add(timer, forMode: .common)
         refreshTimer = timer
@@ -226,7 +254,7 @@ final class PiPOverlay: NSObject, ObservableObject, AVPictureInPictureController
         guard displayLayer.isReadyForMoreMediaData else { return }
         guard let pixelBuffer = acquirePixelBuffer() else { return }
         draw(into: pixelBuffer)
-        guard let sampleBuffer = makeSampleBuffer(from: pixelBuffer, duration: refreshInterval) else { return }
+        guard let sampleBuffer = makeSampleBuffer(from: pixelBuffer, duration: currentRefreshInterval) else { return }
         displayLayer.enqueue(sampleBuffer)
     }
 
