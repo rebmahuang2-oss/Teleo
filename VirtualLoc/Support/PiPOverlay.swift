@@ -15,6 +15,36 @@ extension Notification.Name {
     static let teleoPiPPrev = Notification.Name("teleoPiPPrev")
 }
 
+/// 這顆 view 的 backing layer 就是 `AVSampleBufferDisplayLayer` 本身——
+/// 把 `layerClass` 換掉，不是另外用 `addSublayer` 塞一個 displayLayer 進一個
+/// 普通的 `UIView` 裡。反組譯 FreeWay 發現這就是他們的 `RouteInfoLayerView`
+/// 的做法。
+final class PiPDisplayLayerView: UIView {
+    override class var layerClass: AnyClass { AVSampleBufferDisplayLayer.self }
+    var displayLayer: AVSampleBufferDisplayLayer { layer as! AVSampleBufferDisplayLayer }
+}
+
+/// 把 `PiPDisplayLayerView` 真的放進 SwiftUI 的 View 階層裡（反組譯 FreeWay
+/// 發現他們是用一個叫 `RouteInfoSurface` 的 `UIViewRepresentable` 做這件事），
+/// 不是像我們原本那樣另外生一個 view、用 `window.addSubview` 事後硬塞進去。
+/// 子母畫面要用的 `AVSampleBufferDisplayLayer` 得是畫面渲染管線正常追蹤、
+/// 真的在 View 階層裡的東西，系統才會確實合成、顯示我們送進去的內容——
+/// 這正是修了座標翻轉、`isReadyForMoreMediaData`、送幀頻率都沒用，浮動視窗
+/// 依然整塊黑的真正原因。放在 App 最外層（見 `VirtualLocApp.swift`），
+/// 整個 App 生命週期都存在，不會因為切分頁而被拆掉重建。
+struct PiPSurfaceHost: UIViewRepresentable {
+    func makeUIView(context: Context) -> PiPDisplayLayerView {
+        let view = PiPDisplayLayerView()
+        view.backgroundColor = .clear
+        view.isOpaque = false
+        view.isUserInteractionEnabled = false
+        PiPOverlay.shared.attach(view.displayLayer)
+        return view
+    }
+
+    func updateUIView(_ uiView: PiPDisplayLayerView, context: Context) {}
+}
+
 /// 讓路線進度能用「子母畫面（Picture in Picture）」的方式浮在其他 App 最上面，
 /// 離開 Teleo（例如切回 Pikmin Bloom）時還能看到走到第幾點、剩多久。
 ///
@@ -80,9 +110,19 @@ final class PiPOverlay: NSObject, ObservableObject, AVPictureInPictureController
     @AppStorage("pipOverlayEnabled") var enabled = false
 
     private var pip: AVPictureInPictureController?
-    private let displayLayer = AVSampleBufferDisplayLayer()
+    /// 反組譯 FreeWay 發現他們的 `AVSampleBufferDisplayLayer` 不是另外生一個
+    /// `UIView` 用 `addSublayer` 塞進去、再用 `window.addSubview` 硬掛上去
+    /// （我們原本的做法）。他們是自訂一個 `UIView` 子類別，把 `layerClass`
+    /// 換成 `AVSampleBufferDisplayLayer`（見下面 `PiPDisplayLayerView`），
+    /// 再用 SwiftUI 的 `UIViewRepresentable`（見 `PiPSurfaceHost`）把這顆 view
+    /// 真的放進畫面的 SwiftUI View 階層裡，走正常的版面配置流程。我們原本那種
+    /// 「硬塞進 window」的 view，不是真的被畫面渲染管線正常追蹤的一部分，
+    /// 很可能這就是不管怎麼修，浮動視窗永遠整塊黑、系統根本沒有真的去合成
+    /// 顯示我們送進去內容的根本原因。現在改成等 `PiPSurfaceHost` 在真正的
+    /// SwiftUI 階層裡建立出這顆 view 之後，呼叫 `attach(_:)` 把 layer 接起來，
+    /// 接起來之前都是 nil。
+    private(set) var displayLayer: AVSampleBufferDisplayLayer?
     private let playbackDelegate = PiPPlaybackDelegate()
-    private var sourceView: UIView?
     private var silentPlayer: AVAudioPlayer?
     private var pixelBufferPool: CVPixelBufferPool?
     /// 定期重新送一張畫面進子母畫面，不管內容有沒有變。反組譯同類型的真實 App
@@ -126,23 +166,30 @@ final class PiPOverlay: NSObject, ObservableObject, AVPictureInPictureController
         }
     }
 
+    /// 由 `PiPSurfaceHost`（SwiftUI 的 `UIViewRepresentable`）在真的建立那顆
+    /// view 時呼叫一次，把它的 backing layer（就是 `AVSampleBufferDisplayLayer`
+    /// 本身，不是另外塞進去的 sublayer）接起來。在這之前 `displayLayer` 是
+    /// nil，`prepare()` 會先等著、什麼都不做。
+    func attach(_ layer: AVSampleBufferDisplayLayer) {
+        guard displayLayer == nil else { return }
+        layer.videoGravity = .resizeAspect
+        // 跟反組譯 FreeWay 看到的一樣：layer 本身設成透明、不透明度 false，
+        // 這樣這顆幾乎看不見的 host view 才不會在正常畫面上露出任何痕跡。
+        layer.backgroundColor = UIColor.clear.cgColor
+        layer.isOpaque = false
+        layer.controlTimebase = PiPOverlay.makeControlTimebase()
+        self.controlTimebase = layer.controlTimebase
+        self.displayLayer = layer
+        if enabled { renderFrame() }
+    }
+
     /// 在 App 啟動時呼叫一次，準備好（但不會立刻顯示）子母畫面。
     func prepare() {
         guard enabled, pip == nil else { return }
+        // `PiPSurfaceHost` 還沒在 SwiftUI 階層裡真的建立出 view、呼叫
+        // `attach(_:)` 之前，這裡先放棄，下次 `start()` 會再試一次。
+        guard let displayLayer else { return }
         guard AVPictureInPictureController.isPictureInPictureSupported() else { return }
-
-        // 「播放樣式」子母畫面一樣要求 displayLayer 真的掛在畫面的 view 階層裡，
-        // 系統才知道這塊畫面在螢幕上的哪個位置、該從哪裡浮出來。
-        let view = UIView(frame: CGRect(origin: .zero, size: renderSize))
-        view.isUserInteractionEnabled = false
-        view.alpha = 0.01
-        displayLayer.frame = view.bounds
-        displayLayer.videoGravity = .resizeAspect
-        displayLayer.controlTimebase = PiPOverlay.makeControlTimebase()
-        self.controlTimebase = displayLayer.controlTimebase
-        view.layer.addSublayer(displayLayer)
-        self.sourceView = view
-        attachSourceViewIfNeeded(view)
 
         let source = AVPictureInPictureController.ContentSource(
             sampleBufferDisplayLayer: displayLayer, playbackDelegate: playbackDelegate)
@@ -155,22 +202,10 @@ final class PiPOverlay: NSObject, ObservableObject, AVPictureInPictureController
         renderFrame()
     }
 
-    /// 把 sourceView 掛到目前最上層的視窗上（alpha 很低、不接受互動，幾乎看不見），
-    /// 子母畫面才找得到它該浮在哪個位置。如果呼叫當下視窗還沒準備好就先放棄，
-    /// 下次呼叫 start() 時會再試一次，不會卡住。
-    private func attachSourceViewIfNeeded(_ view: UIView) {
-        guard view.superview == nil else { return }
-        guard let window = UIApplication.shared.connectedScenes
-            .compactMap({ ($0 as? UIWindowScene)?.windows.first(where: { $0.isKeyWindow }) })
-            .first else { return }
-        window.addSubview(view)
-    }
-
     /// 開始浮動（通常在路線開始跑、或 App 要切到背景時呼叫）。
     func start() {
         guard enabled else { return }
         prepare()
-        if let sourceView { attachSourceViewIfNeeded(sourceView) }
         guard let pip, !pip.isPictureInPictureActive else { return }
         startSilentAudio()
         pip.startPictureInPicture()
@@ -244,6 +279,7 @@ final class PiPOverlay: NSObject, ObservableObject, AVPictureInPictureController
     /// 靜態快取起來（見 `PiPFrameStyle`），不是每一幀都重新跑一次 SwiftUI 的
     /// 版面計算，這樣持續每秒畫一次才不容易卡頓、比較省電。
     private func renderFrame() {
+        guard let displayLayer else { return }
         rebaseControlTimebaseIfNeeded()
         // 反組譯 FreeWay 的 render() 發現：他們送每一幀之前，一定先做這兩個檢查，
         // 跟我們原本「每秒硬塞一幀，完全不管 displayLayer 準備好了沒」完全不一樣。

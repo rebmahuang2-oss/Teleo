@@ -4,6 +4,7 @@ struct FavoritesTab: View {
     @EnvironmentObject var engine: SimulationEngine
     @EnvironmentObject var store: Store
     @State private var section = 0
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         VStack(spacing: 0) {
@@ -91,7 +92,14 @@ struct FavoritesTab: View {
                     if h.kind == .point, let c = h.coords.first {
                         engine.selected = c
                     } else {
+                        // 歷史紀錄代表「之前跑過的路線」，按載入應該直接恢復走動，
+                        // 不是像「路線」收藏那樣只是把點塞進編輯器、還要再按一次
+                        // 開始——不然使用者會覺得「按了沒反應」。
                         engine.setRoute(h.coords)
+                        engine.startRoute()
+                        // 關掉資料夾視窗，才看得到地圖上已經開始在走了，
+                        // 不然使用者會以為「按了沒反應」。
+                        dismiss()
                     }
                 }
                 .buttonStyle(.borderless)
